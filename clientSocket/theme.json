@@ -1,0 +1,26 @@
+{
+    "pygame_gui": {
+        "font_paths": {
+            "default": "fira_code.ttf"
+        },
+        "font_sizes": {
+            "default": 14
+        },
+        "label": {
+            "default": {
+                "font": "default",
+                "font_size": "default",
+                "text_color": "#FFFFFF",
+                "normal_bg": "#FFFFFF"
+            }
+        },
+        "button": {
+            "default": {
+                "font": "default",
+                "font_size": "default",
+                "normal_text": "#000000",
+                "normal_bg": "#FFFFFF"
+            }
+        }
+    }
+}
