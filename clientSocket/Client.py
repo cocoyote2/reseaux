@@ -3,15 +3,6 @@ import pygame_gui
 import pygame
 from pygame_gui.elements import UILabel, UITextEntryLine, UIButton
 
-def display_waiting_message(manager):
-    # Supprime tous les éléments sauf le message
-    clear_interface(manager)
-    waiting_label = UILabel(
-        relative_rect=pygame.Rect((250, 250), (300, 50)),
-        text="Waiting for a worthy opponent...",
-        manager=manager
-    )
-
 def parse_board(response):
     # Exemple de réponse : "BOARD:Black,,,,,;White,,,,,;,,,,,"
     board_lines = response.split(":")[1].split(";")
@@ -76,9 +67,9 @@ def join_game(game_id, client_socket):
 
     return response
 
-def display_games(games, join_buttons, y_position, refresh_button):
+def display_games(games, join_buttons, y_position):
     # Conserver le bouton "Refresh"
-    clear_interface(manager, preserve=[refresh_button])
+    clear_interface(manager)
 
     if games == "NONE":
         # Rectangle avec un UILabel centré
@@ -161,13 +152,10 @@ def init_pygame():
 
     return screen, background, manager, clock
 
-def clear_interface(manager, preserve=[]):
+def clear_interface(manager):
     root_container = manager.get_root_container()
     for element in root_container.elements.copy():
-        # Conserve les éléments spécifiés dans la liste `preserve`
-        if element in preserve:
-            continue
-        element.kill()
+        element.hide()
 
 def draw_game_info(game_info, position, manager, container=None):
     game_details = game_info.split(";")
@@ -244,8 +232,9 @@ def handle_submit_button(client_socket, join_buttons, y_position):
             display_error_message("Connection failed: Invalid credentials or server error.",
                                   manager)
         else:
-            display_games(response[1], join_buttons, y_position, refresh_button)
+            display_games(response[1], join_buttons, y_position)
             refresh_button.show()
+            create_game_button.show()
             connected = True
     else:
         display_error_message("Please enter both username and password.", manager)
@@ -258,7 +247,7 @@ def handle_refresh_button(client_socket, join_buttons, y_position):
     if not handle_refresh(response)[0]:
         display_error_message("Error when refreshing the game list.", manager)
     else:
-        display_games(handle_refresh(response)[1], join_buttons, y_position, refresh_button)
+        display_games(handle_refresh(response)[1], join_buttons, y_position)
 
 def handle_join_buttons(event, button, game_id, client_socket):
     if event.ui_element == button:
@@ -271,6 +260,29 @@ def handle_join_buttons(event, button, game_id, client_socket):
         else:
             display_error_message("Failed to join the game.", manager)
 
+def handle_create_button(client_socket):
+    send_packet("CREATE", client_socket)
+    response = receive_packet(client_socket)
+
+    if response == "OK":
+        waiting_for_player = True
+        clear_interface(manager)
+        quit_button.show()
+        waiting_label.show()
+    else:
+        print(f"response : {response}")
+
+def handle_quit_button(client_socket, join_buttons, y_position):
+    send_packet("QUIT", client_socket)
+    response = receive_packet(client_socket)
+
+    verb = response.split(" ")[0]
+
+    if verb == "OK":
+        display_games(response.split(" ")[1], join_buttons, y_position)
+        create_game_button.show()
+        refresh_button.show()
+
 def handle_events(event, client_socket, join_buttons, y_position):
     if event.type == pygame.QUIT:
         is_running = False
@@ -282,6 +294,12 @@ def handle_events(event, client_socket, join_buttons, y_position):
 
         if event.ui_element == refresh_button:
             handle_refresh_button(client_socket, join_buttons, y_position)
+
+        if event.ui_element == create_game_button:
+            handle_create_button(client_socket)
+
+        if event.ui_element == quit_button:
+            handle_quit_button(client_socket, join_buttons, y_position)
 
         for button, game_id in join_buttons:
             handle_join_buttons(event, button, game_id, client_socket)
@@ -311,13 +329,6 @@ def main_loop():
 
         for event in pygame.event.get():
             handle_events(event, client_socket, join_buttons, y_position)
-            # Gérer l'affichage si on attend un joueur
-            if waiting_for_player:
-                send_packet("CHECK_PLAYERS", client_socket)
-                response = receive_packet(client_socket)
-
-                if response == "READY":
-                    waiting_for_player = False  # Les deux joueurs sont connectés
 
             # Gérer les clics sur le plateau uniquement si le plateau est visible
             if not waiting_for_player and board_panel is not None:
@@ -339,16 +350,9 @@ def main_loop():
 
             manager.process_events(event)
 
-        # Mise à jour de l'interface
         manager.update(time_delta)
 
-        # Rendu graphique
         screen.blit(background, (0, 0))
-
-        if waiting_for_player:
-            display_waiting_message(manager)  # Affiche un message "En attente d'un joueur"
-        elif not waiting_for_player and board_panel is not None:
-            board_panel, abandon_button = display_board(manager, board_state, current_player, client_socket)
 
         manager.draw_ui(screen)
         pygame.display.update()
@@ -384,6 +388,13 @@ submit_button = UIButton(
     manager=manager
 )
 
+create_game_button = UIButton(
+    relative_rect=pygame.Rect((350, 500), (100, 40)),
+    text="Create Game",
+    manager=manager
+)
+create_game_button.hide()
+
 # Bouton pour rafraîchir la liste des parties
 refresh_button = UIButton(
     relative_rect=pygame.Rect((650, 10), (100, 40)),  # Position dans le coin supérieur droit
@@ -393,14 +404,20 @@ refresh_button = UIButton(
 )
 refresh_button.hide()
 
-create_game_button = UIButton(
-    relative_rect=pygame.Rect((350, 250), (100, 40)),
-    text="Create Game",
+quit_button = UIButton(
+    relative_rect=pygame.Rect((650, 10), (100, 40)),
+    text="Quit",
     manager=manager
 )
-create_game_button.hide()
+quit_button.hide()
 
-refresh_button.hide()
+waiting_label = UILabel(
+        relative_rect=pygame.Rect((250, 250), (300, 50)),
+        text="Waiting for a worthy opponent...",
+        manager=manager
+)
+waiting_label.hide()
+
 def main():
     main_loop()
     return 0

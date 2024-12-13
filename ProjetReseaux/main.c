@@ -69,6 +69,8 @@ void finishGame(Game *game);
 
 void handle_forfeit(Game *game, const Client *forfeiter);
 
+bool quit_game(Game *games, int *curr_available_games, const Client *client);
+
 int main() {
     int s, clilen, flags, max_sd, sd, activity, new_s, valread, i;
     Client clients[MAX_CLIENTS];
@@ -153,7 +155,7 @@ int main() {
 
         // Si une nouvelle connexion arrive
         if (FD_ISSET(s, &readfds)) {
-            new_s = accept(s, (struct sockaddr *)&cli, &clilen);
+            new_s = accept(s, (struct sockaddr *)&cli, (socklen_t*)&clilen);
             if (new_s < 0) {
                 perror("Erreur d'acceptation");
                 return 1;
@@ -183,9 +185,9 @@ int main() {
 
             if (FD_ISSET(sd, &readfds)) {
                 // Lire le message
-                if ((valread = read(sd, buffer, 512)) == 0) {
+                if ((valread = (int)read(sd, buffer, 512)) == 0) {
                     // Le client a fermé la connexion
-                    getpeername(sd, (struct sockaddr *)&cli, &clilen);
+                    getpeername(sd, (struct sockaddr *)&cli, (socklen_t*)&clilen);
                     printf("Client déconnecté : IP %s, Port %d\n", inet_ntoa(cli.sin_addr), ntohs(cli.sin_port));
 
                     // Fermer le socket et le marquer comme disponible
@@ -263,7 +265,7 @@ char* processcmd(char *buffer, Client *client, Game *available_games, Game *acti
             return response;
         }
 
-        snprintf(response, MAX_BUFFER_SIZE, "Game created");
+        snprintf(response, MAX_BUFFER_SIZE, "OK");
     }else if(strcmp(verb, "JOIN") == 0) {
         char *game_id_string = strtok(NULL, " ");
         if(game_id_string == NULL) {
@@ -283,11 +285,18 @@ char* processcmd(char *buffer, Client *client, Game *available_games, Game *acti
         }
 
         snprintf(response, MAX_BUFFER_SIZE, "OK");
-        //sendPacket("Partie finie", *client);
     }else if(strcmp(verb, "STATS") == 0) {
         snprintf(response, MAX_BUFFER_SIZE, "Stats : Name : %s, Wins : %d, Losses : %d", client->name, client->wins, client->losses);
     }else if(strcmp(verb, "QUIT") == 0) {
-        snprintf(response, MAX_BUFFER_SIZE, "Quit");
+        if (!quit_game(available_games, curr_available_games, client)) {
+            snprintf(response, MAX_BUFFER_SIZE, "Impossible de quitter la partie");
+        }
+
+        char games_list[MAX_BUFFER_SIZE];
+
+        displayGameList(*curr_available_games, available_games, games_list);
+
+        snprintf(response, MAX_BUFFER_SIZE, "OK %s", games_list);
     }else if (strcmp(verb, "LIST") == 0){
         char games_list[MAX_BUFFER_SIZE];
         displayGameList(*curr_available_games, available_games, games_list);
@@ -316,7 +325,7 @@ char* processcmd(char *buffer, Client *client, Game *available_games, Game *acti
     return response;
 }
 
-void sendPacket(char* buffer, Client client) {
+void sendPacket(const char* buffer, const Client client) {
     if(client.socket_fd > 0) {
         send(client.socket_fd, buffer, strlen(buffer), 0);
         return;
@@ -397,7 +406,7 @@ void formatCommand(char *buffer) {
     }
 }
 
-bool joinGame(int game_id, Client *client, Game *available_games, int *curr_available_games, Game *active_games, int *curr_active_games) {
+bool joinGame(int game_id, Client *client, Game *available_games, const int *curr_available_games, Game *active_games, int *curr_active_games) {
     if(client->current_game_id != -1) {
         return false;
     }
@@ -438,7 +447,7 @@ void initializePlayer(Client *player) {
     player->forfeit = 0;
 }
 
-void displayGameList(int curr_available_games, Game *available_games, char *games_list) {
+void displayGameList(int curr_available_games, const Game *available_games, char *games_list) {
     games_list[0] = '\0';  // Initialise la chaîne
     for (int i = 0; i < curr_available_games; i++) {
         char game_id_str[MAX_BUFFER_SIZE];
@@ -513,4 +522,20 @@ void handle_forfeit(Game *game, const Client *forfeiter) {
 
     game->player1->current_game_id = -1;
     game->player2->current_game_id = -1;
+}
+
+bool quit_game(Game *games, int *curr_available_games, const Client *client) {
+    for (int i = 0; i < *curr_available_games; i++) {
+        if (games[i].player1 == client) {
+            games[i].player1->current_game_id = -1;
+            games[i].player2->current_game_id = -1;
+            (*curr_available_games)--;
+
+            if (removeGame(i, games, curr_available_games)) {
+                return true;
+            }
+        }
+    }
+
+    return false;
 }

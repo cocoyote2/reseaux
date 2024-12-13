@@ -11,15 +11,15 @@
                 "font": "default",
                 "font_size": "default",
                 "text_color": "#FFFFFF",
-                "normal_bg": "#FFFFFF"
+                "normal_bg": "#000000"
             }
         },
         "button": {
             "default": {
                 "font": "default",
                 "font_size": "default",
-                "normal_text": "#000000",
-                "normal_bg": "#FFFFFF"
+                "normal_text": "#FFFFFF",
+                "normal_bg": "#000000"
             }
         }
     }
