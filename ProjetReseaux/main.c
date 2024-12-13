@@ -29,9 +29,11 @@ typedef struct Client {
     struct sockaddr_in addr;
     char name[50];
     int is_connected;
+    int score;
     int is_authenticated;
     int wins;
     int losses;
+    int forfeit;
     int games_played;
     int current_game_id;
 }Client;
@@ -59,11 +61,13 @@ bool joinGame(int game_id, Client *client, Game *available_games, int *curr_avai
 
 void initializePlayer(Client *player);
 
-void displayGameList(int curr_available_games, Game *available_games, char *game_id_str);
+void displayGameList(int curr_available_games, Game *available_games, char *games_list);
 
 bool removeGame(int game_id, Game *games, int *curr_games);
 
 void finishGame(Game *game);
+
+void handle_forfeit(Game *game, const Client *forfeiter);
 
 int main() {
     int s, clilen, flags, max_sd, sd, activity, new_s, valread, i;
@@ -192,6 +196,7 @@ int main() {
                     // Envoyer le message au client
                     char *response = processcmd(buffer, &clients[i], available_games, active_games, &curr_available_games, &curr_active_games);
 
+                    printf("Commande envoyée : %s\n", response);
                     sendPacket(response, clients[i]);
 
                     free(response);
@@ -199,8 +204,6 @@ int main() {
             }
         }
     }
-
-    return 0;
 }
 
 char* processcmd(char *buffer, Client *client, Game *available_games, Game *active_games, int *curr_available_games, int *curr_active_games) {
@@ -228,7 +231,7 @@ char* processcmd(char *buffer, Client *client, Game *available_games, Game *acti
         }
 
         if(player_name == NULL || strcmp(player_name, "") == 0) {
-            snprintf(response, MAX_BUFFER_SIZE, "Pseudonyme invalides");
+            snprintf(response, MAX_BUFFER_SIZE, "Pseudonyme invalide");
             return response;
         }
 
@@ -249,7 +252,7 @@ char* processcmd(char *buffer, Client *client, Game *available_games, Game *acti
         char games_list[MAX_BUFFER_SIZE];
         displayGameList(*curr_available_games, available_games, games_list);
 
-        snprintf(response, MAX_BUFFER_SIZE, "1;dim;126;1;2;3;ali;127;4;5;6", games_list);
+        snprintf(response, MAX_BUFFER_SIZE, "OK %s", games_list);
     }else if(strcmp(verb, "DISCONNECT") == 0){
         snprintf(response, MAX_BUFFER_SIZE, "Déconnecté.");
     }else if(strcmp(verb, "MOVE") == 0) {
@@ -279,15 +282,35 @@ char* processcmd(char *buffer, Client *client, Game *available_games, Game *acti
             return response;
         }
 
-        snprintf(response, MAX_BUFFER_SIZE, "Game joined.");
-
-        sendPacket("Partie finie", *client);
+        snprintf(response, MAX_BUFFER_SIZE, "OK");
+        //sendPacket("Partie finie", *client);
     }else if(strcmp(verb, "STATS") == 0) {
         snprintf(response, MAX_BUFFER_SIZE, "Stats : Name : %s, Wins : %d, Losses : %d", client->name, client->wins, client->losses);
     }else if(strcmp(verb, "QUIT") == 0) {
         snprintf(response, MAX_BUFFER_SIZE, "Quit");
+    }else if (strcmp(verb, "LIST") == 0){
+        char games_list[MAX_BUFFER_SIZE];
+        displayGameList(*curr_available_games, available_games, games_list);
+
+        snprintf(response, MAX_BUFFER_SIZE, "OK %s", games_list);
+    }else if (strcmp(verb, "FORFEIT") == 0) {
+        if (client->current_game_id == -1) {
+            snprintf(response, MAX_BUFFER_SIZE, "Vous n'êtes pas dans une partie");
+            return response;
+        }
+
+        for (int i = 0; i < *curr_active_games; i++) {
+            if (active_games[i].id == client->current_game_id) {
+                handle_forfeit(&active_games[i], client);
+                snprintf(response, MAX_BUFFER_SIZE, "Vous avez abandonné la partie");
+                return response;
+            }
+        }
+
+        snprintf(response, MAX_BUFFER_SIZE, "Impossible de trouver la partie");
+
     }else {
-        snprintf(response, MAX_BUFFER_SIZE, "Commande invalide : %s + length : %d", verb, strlen(verb));
+        snprintf(response, MAX_BUFFER_SIZE, "Commande invalide : %s + length : %lu", verb, strlen(verb));
     }
 
     return response;
@@ -312,6 +335,8 @@ void init_clients(Client clients[]) {
         clients[i].games_played = 0;
         clients[i].current_game_id = -1;
         clients[i].is_authenticated = 0;
+        clients[i].score = 0;
+        clients[i].forfeit = 0;
     }
 }
 
@@ -325,6 +350,8 @@ void closeconnection(Client *client) {
     client->games_played = 0;
     client->current_game_id = -1;
     client->is_authenticated = 0;
+    client->score = 0;
+    client->forfeit = 0;
 }
 
 bool createGame(Client *client, Game *available_games, int *curr_available_games) {
@@ -387,9 +414,9 @@ bool joinGame(int game_id, Client *client, Game *available_games, int *curr_avai
             active_games[*curr_active_games] = available_games[i];
             (*curr_active_games)++;
 
-            finishGame(&available_games[i]);
+            //finishGame(&available_games[i]);
 
-            removeGame(game_id, available_games, curr_available_games);
+            //removeGame(game_id, available_games, curr_available_games);
 
             return true;
         }
@@ -407,18 +434,33 @@ void initializePlayer(Client *player) {
     player->games_played = 0;
     player->current_game_id = -1;
     player->is_authenticated = 0;
+    player->score = 0;
+    player->forfeit = 0;
 }
 
-void displayGameList(int curr_available_games, Game *available_games, char *game_id_str) {
-    char games_list[MAX_BUFFER_SIZE];
-    for(int i = 0;i<curr_available_games;i++) {
-        if(i == 0) {
-            sprintf(game_id_str, "%d", available_games[i].id);
-        }else {
-            sprintf(game_id_str, ", %d", available_games[i].id);
-        }
+void displayGameList(int curr_available_games, Game *available_games, char *games_list) {
+    games_list[0] = '\0';  // Initialise la chaîne
+    for (int i = 0; i < curr_available_games; i++) {
+        char game_id_str[MAX_BUFFER_SIZE];
+        snprintf(game_id_str, MAX_BUFFER_SIZE, "%d;%s;%d;%d;%d;%d",
+                 available_games[i].id, available_games[i].player1->name,
+                 available_games[i].player1->score, available_games[i].player1->wins,
+                 available_games[i].player1->losses, available_games[i].player1->forfeit);
 
-        strcat(games_list, game_id_str);
+        // Vérifie que le buffer peut accueillir la nouvelle partie
+        if (strlen(games_list) + strlen(game_id_str) + 1 < MAX_BUFFER_SIZE) {
+            if (strlen(games_list) > 0) {
+                strcat(games_list, ",");
+            }
+            strcat(games_list, game_id_str);
+        } else {
+            printf("Erreur : dépassement de buffer dans displayGameList\n");
+            break;
+        }
+    }
+
+    if (strlen(games_list) == 0) {
+        strcat(games_list, "NONE");
     }
 }
 
@@ -454,4 +496,21 @@ void finishGame(Game *game) {
 
     game->player1->games_played++;
     game->player2->games_played++;
+}
+
+void handle_forfeit(Game *game, const Client *forfeiter) {
+    if (game->player1 == forfeiter) {
+        game->player2->wins++;
+        game->player1->forfeit++;
+    } else {
+        game->player1->wins++;
+        game->player2->forfeit++;
+    }
+
+    game->player1->games_played++;
+    game->player2->games_played++;
+    game->is_finished = 1;
+
+    game->player1->current_game_id = -1;
+    game->player2->current_game_id = -1;
 }
