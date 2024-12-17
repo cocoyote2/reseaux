@@ -1,64 +1,11 @@
 import socket
+import threading
+
 import pygame_gui
 import pygame
 from pygame_gui.elements import UILabel, UITextEntryLine, UIButton
 
-def parse_board(response):
-    # Exemple de réponse : "BOARD:Black,,,,,;White,,,,,;,,,,,"
-    board_lines = response.split(":")[1].split(";")
-    return [line.split(",") for line in board_lines]
-
-def display_board(manager, board_state, current_player, client_socket):
-    """
-    Affiche le plateau de jeu et gère les interactions.
-
-    Args:
-        manager: UIManager de pygame_gui.
-        board_state: Matrice 19x19 représentant l'état du plateau.
-        current_player: Joueur actuel ("Black" ou "White").
-        client_socket: Socket pour la communication serveur.
-    """
-    # Taille du plateau
-    board_size = 19
-    cell_size = 30
-    board_offset = 50  # Décalage pour centrer le plateau
-    board_panel = pygame_gui.elements.UIPanel(
-        relative_rect=pygame.Rect((board_offset, board_offset), (board_size * cell_size, board_size * cell_size)),
-        starting_height=1,
-        manager=manager,
-        object_id="#board_panel"
-    )
-
-    # Affiche le plateau
-    for row in range(board_size):
-        for col in range(board_size):
-            cell_color = "#FFFFFF"  # Blanc par défaut
-            if board_state[row][col] == "Black":
-                cell_color = "#000000"
-            elif board_state[row][col] == "White":
-                cell_color = "#FFFFFF"
-            else:
-                cell_color = "#D3D3D3"  # Gris clair pour les cases vides
-
-            # Création d'une case
-            pygame_gui.elements.UIPanel(
-                relative_rect=pygame.Rect((col * cell_size, row * cell_size), (cell_size, cell_size)),
-                starting_height=2,
-                manager=manager,
-                container=board_panel,
-                object_id=None
-            )
-
-    # Bouton Abandonner
-    abandon_button = pygame_gui.elements.UIButton(
-        relative_rect=pygame.Rect((700, 10), (100, 30)),
-        text="Abandon",
-        manager=manager
-    )
-
-    return board_panel, abandon_button
-
-
+global show_board
 
 def join_game(game_id, client_socket):
     packet = f"JOIN {game_id}"
@@ -70,7 +17,9 @@ def join_game(game_id, client_socket):
 def display_games(games, join_buttons, y_position):
     # Conserver le bouton "Refresh"
     clear_interface(manager)
-
+    refresh_button.show()
+    disconnect_button.show()
+    create_game_button.show()
     if games == "NONE":
         # Rectangle avec un UILabel centré
         rect_width, rect_height = 400, 100
@@ -85,7 +34,6 @@ def display_games(games, join_buttons, y_position):
             object_id="#no_games_panel"
         )
 
-        # Label pour le message
         no_games_label = UILabel(
             relative_rect=pygame.Rect(10, 10, rect_width - 20, rect_height - 20),
             text="No games available",
@@ -136,6 +84,7 @@ def send_packet(data, client_socket):
 
 def receive_packet(client_socket):
     response = client_socket.recv(1024)
+
     return response.decode("utf-8")
 
 
@@ -222,7 +171,7 @@ def handle_refresh(response):
 
     return True, response.split(" ")[1]
 
-def handle_submit_button(client_socket, join_buttons, y_position):
+def handle_submit_button(client_socket, join_buttons, y_position, connected):
     username = username_input.get_text()
     password = password_input.get_text()
     if username and password:
@@ -232,10 +181,11 @@ def handle_submit_button(client_socket, join_buttons, y_position):
             display_error_message("Connection failed: Invalid credentials or server error.",
                                   manager)
         else:
+            connected["value"] = True
             display_games(response[1], join_buttons, y_position)
             refresh_button.show()
             create_game_button.show()
-            connected = True
+            disconnect_button.show()
     else:
         display_error_message("Please enter both username and password.", manager)
 
@@ -249,31 +199,38 @@ def handle_refresh_button(client_socket, join_buttons, y_position):
     else:
         display_games(handle_refresh(response)[1], join_buttons, y_position)
 
-def handle_join_buttons(event, button, game_id, client_socket):
+def handle_join_buttons(event, button, game_id, client_socket, in_game):
+    global show_board  # Important pour modifier la variable globale
     if event.ui_element == button:
-        # Si on rejoint une partie existante
-        send_packet(f"JOIN {game_id}", client_socket)
-        response = receive_packet(client_socket)
-        if response.startswith("START"):
-            board_state = parse_board(response)  # Initialise le plateau
-            waiting_for_player = False
-        else:
-            display_error_message("Failed to join the game.", manager)
+        response = join_game(game_id, client_socket)
 
-def handle_create_button(client_socket):
+        if response == "OK":
+            print(f"Game {game_id} joined successfully.")
+            show_board = True
+            in_game["value"] = True
+        else:
+            print(f"Error when joining game {game_id}.")
+
+
+def handle_create_button(client_socket, waiting_for_player, in_game):
     send_packet("CREATE", client_socket)
     response = receive_packet(client_socket)
 
     if response == "OK":
-        waiting_for_player = True
         clear_interface(manager)
         quit_button.show()
         waiting_label.show()
+        waiting_for_player["value"] = True
+        in_game["value"] = True
     else:
         print(f"response : {response}")
 
-def handle_quit_button(client_socket, join_buttons, y_position):
-    send_packet("QUIT", client_socket)
+def handle_quit_button(client_socket, join_buttons, y_position, waiting_for_player):
+    if waiting_for_player["value"]:
+        send_packet("QUIT", client_socket)
+    else:
+        send_packet("FORFEIT", client_socket)
+
     response = receive_packet(client_socket)
 
     verb = response.split(" ")[0]
@@ -282,77 +239,205 @@ def handle_quit_button(client_socket, join_buttons, y_position):
         display_games(response.split(" ")[1], join_buttons, y_position)
         create_game_button.show()
         refresh_button.show()
+        disconnect_button.show()
 
-def handle_events(event, client_socket, join_buttons, y_position):
+def handle_disconnect_button(client_socket):
+    send_packet("DISCONNECT", client_socket)
+
+def handle_board_click(board_state, mouse_x, mouse_y, current_player):
+    """
+    Gère le clic sur le plateau de jeu et retourne les coordonnées du mouvement effectué.
+
+    Args:
+        board_state (list): Matrice 19x19 représentant l'état du plateau.
+        mouse_x (int): Position X de la souris au moment du clic.
+        mouse_y (int): Position Y de la souris au moment du clic.
+        current_player (str): Le joueur actuel ("Black" ou "White").
+
+    Returns:
+        tuple: (bool, tuple) - Le booléen indique si le mouvement a été effectué avec succès.
+               La deuxième valeur est un tuple (row, col) des coordonnées du coup si réussi, ou None sinon.
+    """
+    board_size = 19
+    cell_size = 30  # Taille d'une cellule en pixels
+    screen_width, screen_height = screen.get_size()
+    board_pixel_size = board_size * cell_size
+
+    # Calcul des offsets pour centrer le plateau
+    x_offset = (screen_width - board_pixel_size) // 2
+    y_offset = (screen_height - board_pixel_size) // 2
+
+    # Vérifie si le clic est dans les limites du plateau
+    if x_offset <= mouse_x <= x_offset + board_pixel_size and \
+            y_offset <= mouse_y <= y_offset + board_pixel_size:
+
+        # Calculer les indices de la case cliquée
+        col = (mouse_x - x_offset) // cell_size
+        row = (mouse_y - y_offset) // cell_size
+
+        # Vérifie si la cellule est vide
+        if board_state[row][col] == "":
+            board_state[row][col] = current_player["curr"]
+            print(f"Placed {current_player} at ({row}, {col})")
+            current_player["curr"] = "Black" if current_player["curr"] == "White" else "White"
+            return True, (row, col)  # Mouvement réussi avec coordonnées
+        else:
+            print(f"Cell ({row}, {col}) is already occupied.")
+    else:
+        print("Click outside the board.")
+
+    return False, None  # Mouvement échoué
+
+
+def handle_events(event, client_socket, join_buttons, y_position, empty_board, current_player, connected,
+                  waiting_for_player, in_game):
     if event.type == pygame.QUIT:
         is_running = False
+
+    if connected and show_board:
+        if event.type == pygame.MOUSEBUTTONDOWN:  # Détecter un clic de souris
+            if handle_board_click(empty_board, event.pos[0], event.pos[1], current_player)[0]:
+                move = handle_board_click(empty_board, event.pos[0], event.pos[1], current_player)[1]
 
     # Gestion des événements liés à PyGame-GUI
     if event.type == pygame_gui.UI_BUTTON_PRESSED:
         if event.ui_element == submit_button:
-            handle_submit_button(client_socket, join_buttons, y_position)
+            handle_submit_button(client_socket, join_buttons, y_position, connected)
 
         if event.ui_element == refresh_button:
             handle_refresh_button(client_socket, join_buttons, y_position)
 
         if event.ui_element == create_game_button:
-            handle_create_button(client_socket)
+            handle_create_button(client_socket, waiting_for_player, in_game)
 
         if event.ui_element == quit_button:
-            handle_quit_button(client_socket, join_buttons, y_position)
+            handle_quit_button(client_socket, join_buttons, y_position, waiting_for_player)
+
+        if event.ui_element == disconnect_button:
+            handle_disconnect_button(client_socket)
+            return False
 
         for button, game_id in join_buttons:
-            handle_join_buttons(event, button, game_id, client_socket)
+            handle_join_buttons(event, button, game_id, client_socket, in_game)
+
+    return True
+
+def display_pente_board(screen, board_state):
+    """
+    Affiche un plateau de jeu de Pente interactif avec gestion des pions.
+
+    Args:
+        screen: Surface PyGame où dessiner le plateau.
+        board_state: Matrice 19x19 représentant l'état du plateau
+                     ("Black", "White", ou "") pour chaque intersection.
+    """
+    #TODO: display pieces on intersections
+    clear_interface(manager)
+
+    # Dimensions du plateau et de la fenêtre
+    board_size = 19
+    cell_size = 30  # Taille d'une cellule en pixels
+    window_width, window_height = screen.get_size()
+    board_pixel_size = board_size * cell_size
+
+    # Calcul des offsets pour centrer le plateau
+    x_offset = (window_width - board_pixel_size) // 2
+    y_offset = (window_height - board_pixel_size) // 2
+
+    # Couleur des lignes de la grille
+    grid_color = pygame.Color("#000000")  # Noir
+
+    # Dessiner les lignes horizontales et verticales
+    for i in range(board_size + 1):  # Ajouter une ligne supplémentaire pour le bord droit/bas
+        # Ligne horizontale
+        pygame.draw.line(screen, grid_color,
+                         (x_offset, y_offset + i * cell_size),
+                         (x_offset + board_pixel_size, y_offset + i * cell_size), 1)
+        # Ligne verticale
+        pygame.draw.line(screen, grid_color,
+                         (x_offset + i * cell_size, y_offset),
+                         (x_offset + i * cell_size, y_offset + board_pixel_size), 1)
+
+    # Dessiner les pions
+    for row in range(board_size):
+        for col in range(board_size):
+            # Position absolue de la cellule
+            cell_x = x_offset + col * cell_size
+            cell_y = y_offset + row * cell_size
+
+            # Récupérer l'état de la cellule
+            cell_state = board_state[row][col]
+
+            # Dessiner un pion si nécessaire
+            if cell_state == "Black":
+                color = pygame.Color("#000000")  # Noir
+                border_color = pygame.Color("#FFFFFF")  # Bordure blanche pour le noir
+            elif cell_state == "White":
+                color = pygame.Color("#FFFFFF")  # Blanc
+                border_color = pygame.Color("#000000")  # Bordure noire pour le blanc
+            else:
+                color = None
+                border_color = None
+
+            if color:
+                # Dessiner la bordure (cercle plus grand)
+                pygame.draw.circle(screen, border_color,
+                                   (cell_x + cell_size // 2, cell_y + cell_size // 2),
+                                   cell_size // 3 + 2)  # Rayon plus grand pour la bordure
+
+                # Dessiner le pion (cercle plus petit à l'intérieur de la bordure)
+                pygame.draw.circle(screen, color,
+                                   (cell_x + cell_size // 2, cell_y + cell_size // 2),
+                                   cell_size // 3)  # Rayon plus petit pour le pion
+
+def handle_waiting(waiting_for_player, client_socket):
+    while waiting_for_player["value"]:
+        response = receive_packet(client_socket)
+        if response == "OK":
+            return True
 
 def main_loop():
     # Initialisation de la connexion au serveur
     join_buttons = []
     y_position = 100
-    connected = False
-    waiting_for_player = False  # Indique si on attend un adversaire
-    current_player = "Black"  # Par défaut, commence par Noir
+    current_player = {"curr": "Black"}  # Par défaut, commence par Noir
     client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-
-    # Plateau de jeu initial (19x19 cases vides)
-    board_state = [["" for _ in range(19)] for _ in range(19)]
-    board_panel, abandon_button = None, None
-
+    empty_board = [["" for _ in range(19)] for _ in range(19)]
+    global show_board
+    show_board = False
+    connected = {"value": False}
+    waiting_for_player = {"value": False}
+    in_game = {"value" : False}
     try:
         client_socket.connect(('127.0.0.1', 55555))
     except ConnectionRefusedError:
         print("Unable to connect to the server.")
         exit()
 
+    waiting_thread = threading.Thread(target=handle_waiting, args=(waiting_for_player, client_socket))
+    waiting_thread.start()
+
     is_running = True
     while is_running:
         time_delta = clock.tick(60) / 1000.0
 
         for event in pygame.event.get():
-            handle_events(event, client_socket, join_buttons, y_position)
-
-            # Gérer les clics sur le plateau uniquement si le plateau est visible
-            if not waiting_for_player and board_panel is not None:
-                if event.type == pygame.MOUSEBUTTONDOWN:
-                    mouse_x, mouse_y = event.pos
-                    col = (mouse_x - 50) // 30
-                    row = (mouse_y - 50) // 30
-
-                    if 0 <= row < 19 and 0 <= col < 19:
-                        if board_state[row][col] == "":
-                            board_state[row][col] = current_player
-                            send_packet(f"PLAY {row} {col}", client_socket)
-
-                            response = receive_packet(client_socket)
-                            if response.startswith("BOARD"):
-                                board_state = parse_board(response)
-
-                            current_player = "White" if current_player == "Black" else "Black"
+            if not handle_events(event, client_socket, join_buttons, y_position, empty_board, current_player, connected, waiting_for_player, in_game):
+                is_running = False
 
             manager.process_events(event)
+
+        print(f"Waiting and in_game : {waiting_for_player["value"]}, {in_game["value"]}")
+
+        if not waiting_for_player["value"] and in_game["value"]:
+            show_board = True
 
         manager.update(time_delta)
 
         screen.blit(background, (0, 0))
+
+        if show_board:
+            display_pente_board(screen, empty_board)
 
         manager.draw_ui(screen)
         pygame.display.update()
@@ -417,6 +502,14 @@ waiting_label = UILabel(
         manager=manager
 )
 waiting_label.hide()
+
+disconnect_button = UIButton(
+    relative_rect=pygame.Rect((10, 10), (120, 40)),  # Coin supérieur gauche
+    text="Déconnexion",
+    manager=manager,
+    object_id="#disconnect_button"  # ID unique
+)
+disconnect_button.hide()
 
 def main():
     main_loop()

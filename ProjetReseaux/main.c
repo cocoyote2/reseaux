@@ -45,7 +45,7 @@ typedef struct Game {
     int is_finished;
 }Game;
 
-void sendPacket(char* buffer, Client client);
+void sendPacket(const char* buffer, Client client);
 
 char* processcmd(char *buffer, Client *client, Game *available_games, Game *active_games, int *curr_available_games, int *curr_active_games);
 
@@ -57,11 +57,11 @@ bool createGame(Client *client, Game *available_games, int *curr_available_games
 
 void formatCommand(char *buffer);
 
-bool joinGame(int game_id, Client *client, Game *available_games, int *curr_available_games, Game *active_games, int *curr_active_games);
+bool joinGame(int game_id, Client *client, Game *available_games, const int *curr_available_games, Game *active_games, int *curr_active_games);
 
 void initializePlayer(Client *player);
 
-void displayGameList(int curr_available_games, Game *available_games, char *games_list);
+void displayGameList(int curr_available_games, const Game *available_games, char *games_list);
 
 bool removeGame(int game_id, Game *games, int *curr_games);
 
@@ -423,6 +423,9 @@ bool joinGame(int game_id, Client *client, Game *available_games, const int *cur
             active_games[*curr_active_games] = available_games[i];
             (*curr_active_games)++;
 
+            //Notify player 1
+            sendPacket("OK", *available_games[i].player1);
+            printf("Player 1 notified\n");
             //finishGame(&available_games[i]);
 
             //removeGame(game_id, available_games, curr_available_games);
