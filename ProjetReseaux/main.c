@@ -57,7 +57,7 @@ bool createGame(Client *client, Game *available_games, int *curr_available_games
 
 void formatCommand(char *buffer);
 
-bool joinGame(int game_id, Client *client, Game *available_games, const int *curr_available_games, Game *active_games, int *curr_active_games);
+bool joinGame(int game_id, Client *client, Game *available_games, int *curr_available_games, Game *active_games, int *curr_active_games);
 
 void initializePlayer(Client *player);
 
@@ -67,7 +67,7 @@ bool removeGame(int game_id, Game *games, int *curr_games);
 
 void finishGame(Game *game);
 
-void handle_forfeit(Game *game, const Client *forfeiter);
+void handle_forfeit(Game *game, const Client *forfeiter, int *curr_active_games, Game *active_games);
 
 bool quit_game(Game *games, int *curr_available_games, const Client *client);
 
@@ -310,14 +310,46 @@ char* processcmd(char *buffer, Client *client, Game *available_games, Game *acti
 
         for (int i = 0; i < *curr_active_games; i++) {
             if (active_games[i].id == client->current_game_id) {
-                handle_forfeit(&active_games[i], client);
-                snprintf(response, MAX_BUFFER_SIZE, "Vous avez abandonné la partie");
+                char games_list[MAX_BUFFER_SIZE];
+                handle_forfeit(&active_games[i], client, curr_active_games, active_games);
+                displayGameList(*curr_available_games, available_games, games_list);
+                snprintf(response, MAX_BUFFER_SIZE, "OK %s", games_list);
                 return response;
             }
         }
 
         snprintf(response, MAX_BUFFER_SIZE, "Impossible de trouver la partie");
+    }else if (strcmp(verb, "ISFULL") == 0) {
+        int game_id = client->current_game_id;
+        bool is_full = false;
 
+        // Vérifie dans available_games
+        for (int i = 0; i < *curr_available_games; i++) {
+            if (available_games[i].id == game_id) {
+                // La partie est dans available_games : vérifie si elle est complète
+                if (available_games[i].player2 != NULL && available_games[i].player2->socket_fd != 0) {
+                    is_full = true;  // Complète
+                }
+                break;  // Partie trouvée, inutile de continuer
+            }
+        }
+
+        // Vérifie dans active_games si pas encore trouvée
+        if (!is_full) {
+            for (int i = 0; i < *curr_active_games; i++) {
+                if (active_games[i].id == game_id) {
+                    is_full = true;  // Une partie dans active_games est toujours complète
+                    break;  // Partie trouvée
+                }
+            }
+        }
+
+        // Répondre en fonction de l'état
+        if (is_full) {
+            snprintf(response, MAX_BUFFER_SIZE, "YES");
+        } else {
+            snprintf(response, MAX_BUFFER_SIZE, "NO");
+        }
     }else {
         snprintf(response, MAX_BUFFER_SIZE, "Commande invalide : %s + length : %lu", verb, strlen(verb));
     }
@@ -406,7 +438,7 @@ void formatCommand(char *buffer) {
     }
 }
 
-bool joinGame(int game_id, Client *client, Game *available_games, const int *curr_available_games, Game *active_games, int *curr_active_games) {
+bool joinGame(int game_id, Client *client, Game *available_games, int *curr_available_games, Game *active_games, int *curr_active_games) {
     if(client->current_game_id != -1) {
         return false;
     }
@@ -417,18 +449,16 @@ bool joinGame(int game_id, Client *client, Game *available_games, const int *cur
                 return false;
             }
 
-            available_games[i].player2 = client;
-            client->current_game_id = game_id;
-
             active_games[*curr_active_games] = available_games[i];
             (*curr_active_games)++;
 
-            //Notify player 1
-            sendPacket("OK", *available_games[i].player1);
-            printf("Player 1 notified\n");
-            //finishGame(&available_games[i]);
+            active_games[*curr_active_games-1].player2 = client;
+            client->current_game_id = *curr_active_games-1;
 
-            //removeGame(game_id, available_games, curr_available_games);
+            for (int j = i; j < *curr_available_games - 1; j++) {
+                available_games[j] = available_games[j + 1];
+            }
+            (*curr_available_games)--;
 
             return true;
         }
@@ -510,7 +540,7 @@ void finishGame(Game *game) {
     game->player2->games_played++;
 }
 
-void handle_forfeit(Game *game, const Client *forfeiter) {
+void handle_forfeit(Game *game, const Client *forfeiter, int *curr_active_games, Game *active_games) {
     if (game->player1 == forfeiter) {
         game->player2->wins++;
         game->player1->forfeit++;
@@ -525,6 +555,11 @@ void handle_forfeit(Game *game, const Client *forfeiter) {
 
     game->player1->current_game_id = -1;
     game->player2->current_game_id = -1;
+
+    //TODO: Send a message to the other player if the game is over
+    sendPacket("OK", *game->player2);
+
+    removeGame(game->id, active_games, curr_active_games);
 }
 
 bool quit_game(Game *games, int *curr_available_games, const Client *client) {

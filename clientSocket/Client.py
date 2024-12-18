@@ -200,7 +200,7 @@ def handle_refresh_button(client_socket, join_buttons, y_position):
         display_games(handle_refresh(response)[1], join_buttons, y_position)
 
 def handle_join_buttons(event, button, game_id, client_socket, in_game):
-    global show_board  # Important pour modifier la variable globale
+    global show_board
     if event.ui_element == button:
         response = join_game(game_id, client_socket)
 
@@ -210,7 +210,6 @@ def handle_join_buttons(event, button, game_id, client_socket, in_game):
             in_game["value"] = True
         else:
             print(f"Error when joining game {game_id}.")
-
 
 def handle_create_button(client_socket, waiting_for_player, in_game):
     send_packet("CREATE", client_socket)
@@ -225,7 +224,8 @@ def handle_create_button(client_socket, waiting_for_player, in_game):
     else:
         print(f"response : {response}")
 
-def handle_quit_button(client_socket, join_buttons, y_position, waiting_for_player):
+def handle_quit_button(client_socket, join_buttons, y_position, waiting_for_player, in_game):
+    global show_board
     if waiting_for_player["value"]:
         send_packet("QUIT", client_socket)
     else:
@@ -235,7 +235,11 @@ def handle_quit_button(client_socket, join_buttons, y_position, waiting_for_play
 
     verb = response.split(" ")[0]
 
+    print(f"response : {response}")
     if verb == "OK":
+        waiting_for_player["value"] = False
+        in_game["value"] = False
+        show_board = False
         display_games(response.split(" ")[1], join_buttons, y_position)
         create_game_button.show()
         refresh_button.show()
@@ -294,11 +298,6 @@ def handle_events(event, client_socket, join_buttons, y_position, empty_board, c
     if event.type == pygame.QUIT:
         is_running = False
 
-    if connected and show_board:
-        if event.type == pygame.MOUSEBUTTONDOWN:  # Détecter un clic de souris
-            if handle_board_click(empty_board, event.pos[0], event.pos[1], current_player)[0]:
-                move = handle_board_click(empty_board, event.pos[0], event.pos[1], current_player)[1]
-
     # Gestion des événements liés à PyGame-GUI
     if event.type == pygame_gui.UI_BUTTON_PRESSED:
         if event.ui_element == submit_button:
@@ -311,7 +310,7 @@ def handle_events(event, client_socket, join_buttons, y_position, empty_board, c
             handle_create_button(client_socket, waiting_for_player, in_game)
 
         if event.ui_element == quit_button:
-            handle_quit_button(client_socket, join_buttons, y_position, waiting_for_player)
+            handle_quit_button(client_socket, join_buttons, y_position, waiting_for_player, in_game)
 
         if event.ui_element == disconnect_button:
             handle_disconnect_button(client_socket)
@@ -319,6 +318,15 @@ def handle_events(event, client_socket, join_buttons, y_position, empty_board, c
 
         for button, game_id in join_buttons:
             handle_join_buttons(event, button, game_id, client_socket, in_game)
+
+    if connected and show_board:
+        if event.type == pygame.MOUSEBUTTONDOWN:  # Détecter un clic de souris
+            if handle_board_click(empty_board, event.pos[0], event.pos[1], current_player)[0]:
+                move = handle_board_click(empty_board, event.pos[0], event.pos[1], current_player)[1]
+
+    if waiting_for_player["value"]:
+        if handle_waiting(client_socket):
+            waiting_for_player["value"] = False
 
     return True
 
@@ -390,11 +398,16 @@ def display_pente_board(screen, board_state):
                                    (cell_x + cell_size // 2, cell_y + cell_size // 2),
                                    cell_size // 3)  # Rayon plus petit pour le pion
 
-def handle_waiting(waiting_for_player, client_socket):
-    while waiting_for_player["value"]:
-        response = receive_packet(client_socket)
-        if response == "OK":
-            return True
+def handle_waiting(client_socket):
+    send_packet("ISFULL", client_socket)
+    response = receive_packet(client_socket)
+
+    print(f"response : {response}")
+
+    if response == "YES":
+        return True
+
+    return False
 
 def main_loop():
     # Initialisation de la connexion au serveur
@@ -414,9 +427,6 @@ def main_loop():
         print("Unable to connect to the server.")
         exit()
 
-    waiting_thread = threading.Thread(target=handle_waiting, args=(waiting_for_player, client_socket))
-    waiting_thread.start()
-
     is_running = True
     while is_running:
         time_delta = clock.tick(60) / 1000.0
@@ -427,8 +437,6 @@ def main_loop():
 
             manager.process_events(event)
 
-        print(f"Waiting and in_game : {waiting_for_player["value"]}, {in_game["value"]}")
-
         if not waiting_for_player["value"] and in_game["value"]:
             show_board = True
 
@@ -438,6 +446,7 @@ def main_loop():
 
         if show_board:
             display_pente_board(screen, empty_board)
+            quit_button.show()
 
         manager.draw_ui(screen)
         pygame.display.update()
@@ -490,7 +499,7 @@ refresh_button = UIButton(
 refresh_button.hide()
 
 quit_button = UIButton(
-    relative_rect=pygame.Rect((650, 10), (100, 40)),
+    relative_rect=pygame.Rect((10, 10), (100, 40)),  # Position en haut à gauche
     text="Quit",
     manager=manager
 )
