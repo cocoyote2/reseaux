@@ -350,6 +350,20 @@ char* processcmd(char *buffer, Client *client, Game *available_games, Game *acti
         } else {
             snprintf(response, MAX_BUFFER_SIZE, "NO");
         }
+    }else if (strcmp(verb, "HASENDED") == 0) {
+        for (int i = 0; i < *curr_active_games; i++) {
+            if (active_games[i].id == client->current_game_id) {
+                if (active_games[i].is_finished == 0) {
+                    snprintf(response, MAX_BUFFER_SIZE, "NO");
+                    return response;
+                }
+            }
+        }
+
+        char game_list[MAX_BUFFER_SIZE];
+        displayGameList(*curr_available_games, available_games, game_list);
+
+        snprintf(response, MAX_BUFFER_SIZE, "YES %s", game_list);
     }else {
         snprintf(response, MAX_BUFFER_SIZE, "Commande invalide : %s + length : %lu", verb, strlen(verb));
     }
@@ -544,9 +558,11 @@ void handle_forfeit(Game *game, const Client *forfeiter, int *curr_active_games,
     if (game->player1 == forfeiter) {
         game->player2->wins++;
         game->player1->forfeit++;
+        sendPacket("END", *game->player2);
     } else {
         game->player1->wins++;
         game->player2->forfeit++;
+        sendPacket("END", *game->player1);
     }
 
     game->player1->games_played++;
@@ -555,9 +571,6 @@ void handle_forfeit(Game *game, const Client *forfeiter, int *curr_active_games,
 
     game->player1->current_game_id = -1;
     game->player2->current_game_id = -1;
-
-    //TODO: Send a message to the other player if the game is over
-    sendPacket("OK", *game->player2);
 
     removeGame(game->id, active_games, curr_active_games);
 }

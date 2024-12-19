@@ -1,5 +1,6 @@
 import socket
 import threading
+from http.client import responses
 
 import pygame_gui
 import pygame
@@ -176,7 +177,6 @@ def handle_submit_button(client_socket, join_buttons, y_position, connected):
     password = password_input.get_text()
     if username and password:
         response = handle_connection(client_socket, username, password)
-        print(f"response : {response}")
         if not response[0]:
             display_error_message("Connection failed: Invalid credentials or server error.",
                                   manager)
@@ -199,7 +199,7 @@ def handle_refresh_button(client_socket, join_buttons, y_position):
     else:
         display_games(handle_refresh(response)[1], join_buttons, y_position)
 
-def handle_join_buttons(event, button, game_id, client_socket, in_game):
+def handle_join_buttons(event, button, game_id, client_socket, in_game, waiting_for_player):
     global show_board
     if event.ui_element == button:
         response = join_game(game_id, client_socket)
@@ -208,6 +208,7 @@ def handle_join_buttons(event, button, game_id, client_socket, in_game):
             print(f"Game {game_id} joined successfully.")
             show_board = True
             in_game["value"] = True
+            waiting_for_player["value"] = False
         else:
             print(f"Error when joining game {game_id}.")
 
@@ -235,7 +236,6 @@ def handle_quit_button(client_socket, join_buttons, y_position, waiting_for_play
 
     verb = response.split(" ")[0]
 
-    print(f"response : {response}")
     if verb == "OK":
         waiting_for_player["value"] = False
         in_game["value"] = False
@@ -317,7 +317,7 @@ def handle_events(event, client_socket, join_buttons, y_position, empty_board, c
             return False
 
         for button, game_id in join_buttons:
-            handle_join_buttons(event, button, game_id, client_socket, in_game)
+            handle_join_buttons(event, button, game_id, client_socket, in_game, waiting_for_player)
 
     if connected and show_board:
         if event.type == pygame.MOUSEBUTTONDOWN:  # Détecter un clic de souris
@@ -402,8 +402,6 @@ def handle_waiting(client_socket):
     send_packet("ISFULL", client_socket)
     response = receive_packet(client_socket)
 
-    print(f"response : {response}")
-
     if response == "YES":
         return True
 
@@ -439,6 +437,12 @@ def main_loop():
 
         if not waiting_for_player["value"] and in_game["value"]:
             show_board = True
+            send_packet("HASENDED", client_socket)
+            response = receive_packet(client_socket)
+            if response.split(" ")[0] == "YES":
+                show_board = False
+                in_game["value"] = False
+                display_games(response.split(" ")[1], join_buttons, y_position)
 
         manager.update(time_delta)
 
