@@ -2,7 +2,7 @@
 #define REVDNS 1
 #define MAX_CLIENTS 10
 #define MAX_GAMES 10
-#define MAX_BUFFER_SIZE 512
+#define MAX_BUFFER_SIZE 1024
 #define PASSWORD "ok"
 
 #include <errno.h>
@@ -78,6 +78,8 @@ void handle_forfeit(Game *game, Client *forfeiter, int *curr_active_games, Game 
 bool quit_game(Game *games, int *curr_available_games, const Client *client);
 
 bool check_move(int row, int col, Game *game);
+
+char* get_board(Game *game);
 
 int main() {
     int s, clilen, flags, max_sd, sd, activity, new_s, valread, i;
@@ -437,11 +439,13 @@ char* processcmd(char *buffer, Client *client, Game *available_games, Game *acti
                     // Adversaire : envoie le dernier mouvement joué
                     if (game->last_move_row != -1 && game->last_move_col != -1) {
                         memset(response, 0, MAX_BUFFER_SIZE);
-                        snprintf(response, MAX_BUFFER_SIZE, "MOVE %d %d", game->last_move_row, game->last_move_col);
+                        char *board = get_board(game);
+                        snprintf(response, MAX_BUFFER_SIZE, "MOVE %s", board);
 
                         // Réinitialiser après l'envoi à l'adversaire
                         game->last_move_row = -1;
                         game->last_move_col = -1;
+                        free(board);
                     } else {
                         // Aucun mouvement récent
                         memset(response, 0, MAX_BUFFER_SIZE);
@@ -529,6 +533,11 @@ bool createGame(Client *client, Game *available_games, int *curr_available_games
     new_game.last_move_col = -1;
     new_game.turn = 1; // Par défaut, le joueur 1 commence
     new_game.last_player_turn = 1;
+    for (int i = 0; i < 19; i++) {
+        for (int j = 0; j < 19; j++) {
+            new_game.board[i][j] = 0;
+        }
+    }
     if (new_game.player2 == NULL) {
         perror("Failed to allocate memory for player2");
         return false;
@@ -702,4 +711,23 @@ bool check_move(int row, int col, Game *game) {
     }
 
     return true;
+}
+
+
+char* get_board(Game *game) {
+    char *buffer = (char*)malloc(361 + 18 * 19 + 1); // 361 characters + 18 commas per row + 1 for null terminator
+    int index = 0;
+    for (int i = 0; i < 19; i++) {
+        for (int j = 0; j < 19; j++) {
+            buffer[index++] = game->board[i][j] + '0';
+            if (j < 18) {
+                buffer[index++] = ',';
+            }
+        }
+        if (i < 18) {
+            buffer[index++] = ',';
+        }
+    }
+    buffer[index] = '\0';
+    return buffer;
 }

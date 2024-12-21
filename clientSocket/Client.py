@@ -200,7 +200,7 @@ def handle_refresh_button(client_socket, join_buttons, y_position):
     else:
         display_games(handle_refresh(response)[1], join_buttons, y_position)
 
-def handle_join_buttons(event, button, game_id, client_socket, in_game, waiting_for_player):
+def handle_join_buttons(event, button, game_id, client_socket, in_game, waiting_for_player, color_player):
     global show_board
     if event.ui_element == button:
         response = join_game(game_id, client_socket)
@@ -210,10 +210,11 @@ def handle_join_buttons(event, button, game_id, client_socket, in_game, waiting_
             show_board = True
             in_game["value"] = True
             waiting_for_player["value"] = False
+            color_player["curr"] = "White"
         else:
             print(f"Error when joining game {game_id}.")
 
-def handle_create_button(client_socket, waiting_for_player, in_game):
+def handle_create_button(client_socket, waiting_for_player, in_game, player_color):
     send_packet("CREATE", client_socket)
     response = receive_packet(client_socket)
 
@@ -223,6 +224,7 @@ def handle_create_button(client_socket, waiting_for_player, in_game):
         waiting_label.show()
         waiting_for_player["value"] = True
         in_game["value"] = True
+        player_color["curr"] = "Black"
     else:
         print(f"response : {response}")
 
@@ -287,10 +289,8 @@ def handle_board_click(board_state, mouse_x, mouse_y, current_player, client_soc
         # Vérifier si le clic est proche de l'intersection
         if abs(mouse_x - intersection_x) <= tolerance and abs(mouse_y - intersection_y) <= tolerance:
             # Vérifie si l'intersection est vide
-            if board_state[row][col] == "":
-                board_state[row][col] = current_player["curr"]
+            if board_state[row][col] == 0:
                 print(f"Placed {current_player['curr']} at ({row}, {col})")
-                current_player["curr"] = "Black" if current_player["curr"] == "White" else "White"
                 send_packet(f"MOVE {row} {col}", client_socket)
                 print("Click packet sent")
                 response = receive_packet(client_socket)
@@ -298,12 +298,14 @@ def handle_board_click(board_state, mouse_x, mouse_y, current_player, client_soc
                 print("Response click : " + response)
 
                 if response == "MOVEOK":
+                    board_state[row][col] = 1 if current_player["curr"] == "Black" else 2
                     return True, (row, col)
                 else:
                     return False, None
 
             else:
                 print(f"Intersection ({row}, {col}) is already occupied.")
+                print(f"Board row col : {board_state[row][col]}")
         else:
             print(f"Click is outside the tolerance zone of any intersection.")
     else:
@@ -312,7 +314,7 @@ def handle_board_click(board_state, mouse_x, mouse_y, current_player, client_soc
     return False, None
 
 def handle_events(event, client_socket, join_buttons, y_position, empty_board, current_player, connected,
-                  waiting_for_player, in_game, current_time, last_time_update):
+                  waiting_for_player, in_game, current_time, last_time_update, board, player_color):
     if event.type == pygame.QUIT:
         is_running = False
 
@@ -325,7 +327,7 @@ def handle_events(event, client_socket, join_buttons, y_position, empty_board, c
             handle_refresh_button(client_socket, join_buttons, y_position)
 
         if event.ui_element == create_game_button:
-            handle_create_button(client_socket, waiting_for_player, in_game)
+            handle_create_button(client_socket, waiting_for_player, in_game, player_color)
 
         if event.ui_element == quit_button:
             handle_quit_button(client_socket, join_buttons, y_position, waiting_for_player, in_game)
@@ -335,7 +337,7 @@ def handle_events(event, client_socket, join_buttons, y_position, empty_board, c
             return False
 
         for button, game_id in join_buttons:
-            handle_join_buttons(event, button, game_id, client_socket, in_game, waiting_for_player)
+            handle_join_buttons(event, button, game_id, client_socket, in_game, waiting_for_player, player_color)
 
 
     if connected and show_board:
@@ -349,7 +351,7 @@ def handle_events(event, client_socket, join_buttons, y_position, empty_board, c
             waiting_for_player["value"] = False
 
     if current_time - last_time_update["value"] >= WAITING_INTERVAL:
-        handle_game_status(waiting_for_player, in_game, client_socket, join_buttons, y_position)
+        handle_game_status(waiting_for_player, in_game, client_socket, join_buttons, y_position, board)
         last_time_update["value"] = current_time
 
     return True
@@ -399,9 +401,9 @@ def display_pente_board(screen, board_state):
             cell_state = board_state[row][col]
 
             # Dessiner un pion si nécessaire
-            if cell_state == "Black":
+            if cell_state == 1:
                 pygame.draw.circle(screen, pygame.Color("#000000"), (cell_x, cell_y), cell_size // 4)
-            elif cell_state == "White":
+            elif cell_state == 2:
                 pygame.draw.circle(screen, pygame.Color("#FFFFFF"), (cell_x, cell_y), cell_size // 4)
 
 
@@ -415,24 +417,29 @@ def handle_waiting(client_socket):
 
     return False
 
-def handle_game_status(waiting_for_player, in_game, client_socket, join_buttons, y_position):
+
+def handle_game_status(waiting_for_player, in_game, client_socket, join_buttons, y_position, board):
     global show_board
     if not waiting_for_player["value"] and in_game["value"]:
-            show_board = True
-            send_packet("STATUS", client_socket)
-            print("Status packet sent")
-            response = receive_packet(client_socket)
-            print("Response status : " + response)
-            split_response = response.split(" ")
+        show_board = True
+        send_packet("STATUS", client_socket)
+        print("Status packet sent")
+        response = receive_packet(client_socket)
+        print("Response status : " + response)
+        split_response = response.split(" ")
 
-            if split_response[0] == "NOTENDED":
-                if len(split_response) > 1:
-                    print(f"X; {response.split(" ")[1]}, Y: {response.split(" ")[2]}")
-            else:
-                if response.split(" ")[0] == "ENDED":
-                    show_board = False
-                    in_game["value"] = False
-                    display_games(response.split(" ")[1], join_buttons, y_position)
+        if split_response[0] == "NOTENDED":
+            if len(split_response) > 1:
+                print(f"X: {split_response[1]}, Y: {split_response[2]}")
+        elif split_response[0] == "ENDED":
+            show_board = False
+            in_game["value"] = False
+            display_games(split_response[1], join_buttons, y_position)
+        elif split_response[0] == "MOVE":
+            tab = split_response[1].split(",")
+            for i in range(19):
+                for j in range(19):
+                    board[i][j] = int(tab[i * 19 + j])
 
 def main_loop():
     # Initialisation de la connexion au serveur
@@ -441,7 +448,7 @@ def main_loop():
     y_position = 100
     current_player = {"curr": "Black"}  # Par défaut, commence par Noir
     client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    empty_board = [["" for _ in range(19)] for _ in range(19)]
+    empty_board = [[0 for _ in range(19)] for _ in range(19)]
     global show_board
     show_board = False
     connected = {"value": False}
@@ -458,7 +465,7 @@ def main_loop():
         time_delta = clock.tick(60) / 1000.0
 
         for event in pygame.event.get():
-            if not handle_events(event, client_socket, join_buttons, y_position, empty_board, current_player, connected, waiting_for_player, in_game, pygame.time.get_ticks(), last_update_time):
+            if not handle_events(event, client_socket, join_buttons, y_position, empty_board, current_player, connected, waiting_for_player, in_game, pygame.time.get_ticks(), last_update_time, empty_board, current_player):
                 is_running = False
 
             manager.process_events(event)
