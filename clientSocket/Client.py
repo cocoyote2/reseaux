@@ -212,7 +212,7 @@ def handle_join_buttons(event, button, game_id, client_socket, in_game, waiting_
             waiting_for_player["value"] = False
             color_player["curr"] = "White"
         else:
-            print(f"Error when joining game {game_id}.")
+            print(f"Error when joining game {game_id}, response : " + response)
 
 def handle_create_button(client_socket, waiting_for_player, in_game, player_color):
     send_packet("CREATE", client_socket)
@@ -231,8 +231,10 @@ def handle_create_button(client_socket, waiting_for_player, in_game, player_colo
 def handle_quit_button(client_socket, join_buttons, y_position, waiting_for_player, in_game):
     global show_board
     if waiting_for_player["value"]:
+        print("Je quitte")
         send_packet("QUIT", client_socket)
     else:
+        print("Je déclare forfait")
         send_packet("FORFEIT", client_socket)
 
     response = receive_packet(client_socket)
@@ -336,6 +338,9 @@ def handle_events(event, client_socket, join_buttons, y_position, empty_board, c
             handle_disconnect_button(client_socket)
             return False
 
+        if event.ui_element == confirm_winner_button:
+            handle_refresh_button(client_socket, join_buttons, y_position)
+
         for button, game_id in join_buttons:
             handle_join_buttons(event, button, game_id, client_socket, in_game, waiting_for_player, player_color)
 
@@ -411,12 +416,16 @@ def display_pente_board(screen, board_state):
 def handle_waiting(client_socket):
     send_packet("ISFULL", client_socket)
     response = receive_packet(client_socket)
-
+    print("Response handle_waiting : " + response)
     if response == "YES":
         return True
 
     return False
 
+def reset_board(board_state):
+    for row in range(len(board_state)):
+        for col in range(len(board_state[row])):
+            board_state[row][col] = 0
 
 def handle_game_status(waiting_for_player, in_game, client_socket, join_buttons, y_position, board):
     global show_board
@@ -432,6 +441,7 @@ def handle_game_status(waiting_for_player, in_game, client_socket, join_buttons,
             if len(split_response) > 1:
                 print(f"X: {split_response[1]}, Y: {split_response[2]}")
         elif split_response[0] == "ENDED":
+            reset_board(board)
             show_board = False
             in_game["value"] = False
             display_games(split_response[1], join_buttons, y_position)
@@ -440,6 +450,21 @@ def handle_game_status(waiting_for_player, in_game, client_socket, join_buttons,
             for i in range(19):
                 for j in range(19):
                     board[i][j] = int(tab[i * 19 + j])
+        elif split_response[0] == "WINNER":
+            reset_board(board)
+            in_game["value"] = False
+            show_board = False
+            clear_interface(manager)
+            winner_label.show()
+            confirm_winner_button.show()
+        elif split_response[0] == "LOSER":
+            reset_board(board)
+            in_game["value"] = False
+            show_board = False
+            clear_interface(manager)
+            loser_label.show()
+            confirm_winner_button.show()
+
 
 def main_loop():
     # Initialisation de la connexion au serveur
@@ -549,6 +574,27 @@ disconnect_button = UIButton(
     object_id="#disconnect_button"  # ID unique
 )
 disconnect_button.hide()
+
+winner_label = UILabel(
+    relative_rect=pygame.Rect((250, 250), (300, 50)),
+    text="You are the winner!",
+    manager=manager
+)
+winner_label.hide()
+
+loser_label = UILabel(
+    relative_rect=pygame.Rect((250, 250), (300, 50)),
+    text="You have lost.",
+    manager=manager
+)
+loser_label.hide()
+
+confirm_winner_button = UIButton(
+    relative_rect=pygame.Rect((350, 350), (100, 40)),
+    text="OK",
+    manager=manager
+)
+confirm_winner_button.hide()
 
 def main():
     main_loop()

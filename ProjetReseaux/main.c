@@ -49,6 +49,7 @@ typedef struct Game {
     int last_move_row;  // Dernière ligne jouée
     int last_move_col;  // Dernière colonne jouée
     int last_player_turn;
+    int winner;
 } Game;
 
 void sendPacket(const char* buffer, Client client);
@@ -71,7 +72,7 @@ void displayGameList(int curr_available_games, const Game *available_games, char
 
 bool removeGame(int game_id, Game *games, int *curr_games);
 
-void finishGame(Game *game);
+void finishGame(Game *game, Client *winner);
 
 void handle_forfeit(Game *game, Client *forfeiter, int *curr_active_games, Game *active_games);
 
@@ -80,6 +81,10 @@ bool quit_game(Game *games, int *curr_available_games, const Client *client);
 bool check_move(int row, int col, Game *game);
 
 char* get_board(Game *game);
+
+bool check_win(Game *game, int row, int col, int turn);
+
+int test = 0;
 
 int main() {
     int s, clilen, flags, max_sd, sd, activity, new_s, valread, i;
@@ -287,6 +292,11 @@ char* processcmd(char *buffer, Client *client, Game *available_games, Game *acti
                     if (check_move(row, col, game)) {
                         printf("LOG: Valid move from %s\n", client->name);
 
+                        if (check_win(game, row, col, game->turn)) {
+                            printf("LOG: %s won the game\n", client->name);
+                            finishGame(game, client);
+                        }
+
                         // Mettre à jour le plateau et enregistrer le mouvement
                         game->last_move_row = row;
                         game->last_move_col = col;
@@ -346,6 +356,7 @@ char* processcmd(char *buffer, Client *client, Game *available_games, Game *acti
 
         memset(response, 0, MAX_BUFFER_SIZE);
         snprintf(response, MAX_BUFFER_SIZE, "OK");
+        return response;
     }else if(strcmp(verb, "STATS") == 0) {
         memset(response, 0, MAX_BUFFER_SIZE);
         snprintf(response, MAX_BUFFER_SIZE, "Stats : Name : %s, Wins : %d, Losses : %d", client->name, client->wins, client->losses);
@@ -429,42 +440,55 @@ char* processcmd(char *buffer, Client *client, Game *available_games, Game *acti
             return response;
         }
 
+        char games_list[MAX_BUFFER_SIZE];
+        displayGameList(*curr_available_games, available_games, games_list);
+
         for (int i = 0; i < *curr_active_games; i++) {
             if (active_games[i].id == client->current_game_id) {
                 Game *game = &active_games[i];
-
-                // Gère les réponses en fonction du joueur et du tour
-                if ((game->last_player_turn == 1 && game->player2 == client) ||
-                    (game->last_player_turn == 2 && game->player1 == client)) {
-                    // Adversaire : envoie le dernier mouvement joué
-                    if (game->last_move_row != -1 && game->last_move_col != -1) {
+                printf("Win status : %d", game->winner);
+                if (game->is_finished) {
+                    if ((game->winner == 1 && game->player1 == client) || (game->winner == 2 && game->player2 == client)) {
+                        client->current_game_id = -1;
                         memset(response, 0, MAX_BUFFER_SIZE);
-                        char *board = get_board(game);
-                        snprintf(response, MAX_BUFFER_SIZE, "MOVE %s", board);
-
-                        // Réinitialiser après l'envoi à l'adversaire
-                        game->last_move_row = -1;
-                        game->last_move_col = -1;
-                        free(board);
+                        snprintf(response, MAX_BUFFER_SIZE, "WINNER %s", games_list);
+                        test++;
                     } else {
-                        // Aucun mouvement récent
+                        memset(response, 0, MAX_BUFFER_SIZE);
+                        snprintf(response, MAX_BUFFER_SIZE, "LOSER %s", games_list);
+                        client->current_game_id = -1;
+                        test++;
+                    }
+                    if (test == 2) {
+                        removeGame(game->id, active_games, curr_active_games);
+                    }
+                } else {
+                    // Handle ongoing game status
+                    if ((game->last_player_turn == 1 && game->player2 == client) ||
+                        (game->last_player_turn == 2 && game->player1 == client)) {
+                        if (game->last_move_row != -1 && game->last_move_col != -1) {
+                            memset(response, 0, MAX_BUFFER_SIZE);
+                            char *board = get_board(game);
+                            snprintf(response, MAX_BUFFER_SIZE, "MOVE %s", board);
+                            game->last_move_row = -1;
+                            game->last_move_col = -1;
+                            free(board);
+                        } else {
+                            memset(response, 0, MAX_BUFFER_SIZE);
+                            snprintf(response, MAX_BUFFER_SIZE, "NOTENDED");
+                        }
+                    } else {
                         memset(response, 0, MAX_BUFFER_SIZE);
                         snprintf(response, MAX_BUFFER_SIZE, "NOTENDED");
                     }
-                } else {
-                    // Joueur actif : partie pas terminée
-                    memset(response, 0, MAX_BUFFER_SIZE);
-                    snprintf(response, MAX_BUFFER_SIZE, "NOTENDED");
                 }
                 return response;
             }
         }
 
-        client->current_game_id = -1;
-        char games_list[MAX_BUFFER_SIZE];
-        displayGameList(*curr_available_games, available_games, games_list);
         memset(response, 0, MAX_BUFFER_SIZE);
         snprintf(response, MAX_BUFFER_SIZE, strcat(strdup("ENDED "), games_list));
+        client->current_game_id = -1;
     }else {
         memset(response, 0, MAX_BUFFER_SIZE);
         snprintf(response, MAX_BUFFER_SIZE, "Commande invalide : %s + length : %lu", verb, strlen(verb));
@@ -528,22 +552,24 @@ bool createGame(Client *client, Game *available_games, int *curr_available_games
 
     new_game.id = *curr_available_games;
     new_game.player1 = client;
-    new_game.player2 = (Client *)malloc(sizeof(Client));
+    //new_game.player2 = (Client *)malloc(sizeof(Client));
     new_game.last_move_row = -1;
     new_game.last_move_col = -1;
     new_game.turn = 1; // Par défaut, le joueur 1 commence
     new_game.last_player_turn = 1;
+    new_game.winner = 0;
+    new_game.player2 = NULL;
     for (int i = 0; i < 19; i++) {
         for (int j = 0; j < 19; j++) {
             new_game.board[i][j] = 0;
         }
     }
-    if (new_game.player2 == NULL) {
+    /*if (new_game.player2 == NULL) {
         perror("Failed to allocate memory for player2");
         return false;
-    }
+    }*/
 
-    initializePlayer(new_game.player2);
+    //initializePlayer(new_game.player2);
     new_game.is_finished = 0;
 
     client->current_game_id = new_game.id;
@@ -565,12 +591,14 @@ void formatCommand(char *buffer) {
 
 bool joinGame(int game_id, Client *client, Game *available_games, int *curr_available_games, Game *active_games, int *curr_active_games) {
     if(client->current_game_id != -1) {
+        printf("Client already in a game\n");
         return false;
     }
 
     for(int i = 0;i<*curr_available_games;i++) {
         if(available_games[i].id == game_id) {
-            if(available_games[i].player2->socket_fd != 0) {
+            if(available_games[i].player2 != NULL && available_games[i].player2->socket_fd != 0) {
+                printf("Game is full\n");
                 return false;
             }
 
@@ -589,6 +617,7 @@ bool joinGame(int game_id, Client *client, Game *available_games, int *curr_avai
         }
     }
 
+    printf("Game not found\n");
     return false;
 }
 
@@ -646,14 +675,11 @@ bool removeGame(int game_id, Game *games, int *curr_games) {
     return false;
 }
 
-void finishGame(Game *game) {
-    int const winner = rand() % 2;
-
+void finishGame(Game *game, Client *winner) {
     game->is_finished = 1;
-    game->player1->current_game_id = -1;
-    game->player2->current_game_id = -1;
+    game->winner = (winner == game->player1) ? 1 : 2;
 
-    if (winner == 0) {
+    if (winner == game->player1) {
         game->player1->wins++;
         game->player2->losses++;
     } else {
@@ -689,7 +715,9 @@ bool quit_game(Game *games, int *curr_available_games, const Client *client) {
     for (int i = 0; i < *curr_available_games; i++) {
         if (games[i].player1 == client) {
             games[i].player1->current_game_id = -1;
-            games[i].player2->current_game_id = -1;
+            if (games[i].player2 != NULL) {
+                games[i].player2->current_game_id = -1;
+            }
             (*curr_available_games)--;
 
             if (removeGame(i, games, curr_available_games)) {
@@ -713,7 +741,6 @@ bool check_move(int row, int col, Game *game) {
     return true;
 }
 
-
 char* get_board(Game *game) {
     char *buffer = (char*)malloc(361 + 18 * 19 + 1); // 361 characters + 18 commas per row + 1 for null terminator
     int index = 0;
@@ -730,4 +757,35 @@ char* get_board(Game *game) {
     }
     buffer[index] = '\0';
     return buffer;
+}
+
+bool check_win(Game *game, int row, int col, int turn) {
+    int directions[4][2] = {{0, 1}, {1, 0}, {1, 1}, {1, -1}};
+    int player = turn;
+
+    for (int d = 0; d < 4; d++) {
+        int count = 1;
+        for (int i = 1; i < 5; i++) {
+            int new_row = row + i * directions[d][0];
+            int new_col = col + i * directions[d][1];
+            if (new_row >= 0 && new_row < 19 && new_col >= 0 && new_col < 19 && game->board[new_row][new_col] == player) {
+                count++;
+            } else {
+                break;
+            }
+        }
+        for (int i = 1; i < 5; i++) {
+            int new_row = row - i * directions[d][0];
+            int new_col = col - i * directions[d][1];
+            if (new_row >= 0 && new_row < 19 && new_col >= 0 && new_col < 19 && game->board[new_row][new_col] == player) {
+                count++;
+            } else {
+                break;
+            }
+        }
+        if (count >= 5) {
+            return true;
+        }
+    }
+    return false;
 }
