@@ -7,6 +7,7 @@ import pygame
 from pygame_gui.elements import UILabel, UITextEntryLine, UIButton
 
 global show_board
+WAITING_INTERVAL = 2000
 
 def join_game(game_id, client_socket):
     packet = f"JOIN {game_id}"
@@ -248,7 +249,7 @@ def handle_quit_button(client_socket, join_buttons, y_position, waiting_for_play
 def handle_disconnect_button(client_socket):
     send_packet("DISCONNECT", client_socket)
 
-def handle_board_click(board_state, mouse_x, mouse_y, current_player):
+def handle_board_click(board_state, mouse_x, mouse_y, current_player, client_socket):
     """
     Gère le clic sur le plateau de jeu et retourne les coordonnées du mouvement effectué.
 
@@ -256,45 +257,62 @@ def handle_board_click(board_state, mouse_x, mouse_y, current_player):
         board_state (list): Matrice 19x19 représentant l'état du plateau.
         mouse_x (int): Position X de la souris au moment du clic.
         mouse_y (int): Position Y de la souris au moment du clic.
-        current_player (str): Le joueur actuel ("Black" ou "White").
+        current_player (dict): Le joueur actuel {"curr": "Black" ou "White"}.
 
     Returns:
-        tuple: (bool, tuple) - Le booléen indique si le mouvement a été effectué avec succès.
-               La deuxième valeur est un tuple (row, col) des coordonnées du coup si réussi, ou None sinon.
+        tuple: (bool, tuple) - True si mouvement réussi, (row, col) pour les coordonnées.
     """
     board_size = 19
     cell_size = 30  # Taille d'une cellule en pixels
+    tolerance = 15  # Rayon de tolérance en pixels
     screen_width, screen_height = screen.get_size()
-    board_pixel_size = board_size * cell_size
+    board_pixel_size = (board_size - 1) * cell_size
 
     # Calcul des offsets pour centrer le plateau
     x_offset = (screen_width - board_pixel_size) // 2
     y_offset = (screen_height - board_pixel_size) // 2
 
     # Vérifie si le clic est dans les limites du plateau
-    if x_offset <= mouse_x <= x_offset + board_pixel_size and \
-            y_offset <= mouse_y <= y_offset + board_pixel_size:
+    if x_offset - tolerance <= mouse_x <= x_offset + board_pixel_size + tolerance and \
+       y_offset - tolerance <= mouse_y <= y_offset + board_pixel_size + tolerance:
 
-        # Calculer les indices de la case cliquée
-        col = (mouse_x - x_offset) // cell_size
-        row = (mouse_y - y_offset) // cell_size
+        # Calculer les indices approximatifs de l'intersection cliquée
+        col = (mouse_x - x_offset + tolerance) // cell_size
+        row = (mouse_y - y_offset + tolerance) // cell_size
 
-        # Vérifie si la cellule est vide
-        if board_state[row][col] == "":
-            board_state[row][col] = current_player["curr"]
-            print(f"Placed {current_player} at ({row}, {col})")
-            current_player["curr"] = "Black" if current_player["curr"] == "White" else "White"
-            return True, (row, col)  # Mouvement réussi avec coordonnées
+        # Calculer la position exacte de l'intersection
+        intersection_x = x_offset + col * cell_size
+        intersection_y = y_offset + row * cell_size
+
+        # Vérifier si le clic est proche de l'intersection
+        if abs(mouse_x - intersection_x) <= tolerance and abs(mouse_y - intersection_y) <= tolerance:
+            # Vérifie si l'intersection est vide
+            if board_state[row][col] == "":
+                board_state[row][col] = current_player["curr"]
+                print(f"Placed {current_player['curr']} at ({row}, {col})")
+                current_player["curr"] = "Black" if current_player["curr"] == "White" else "White"
+                send_packet(f"MOVE {row} {col}", client_socket)
+                print("Click packet sent")
+                response = receive_packet(client_socket)
+
+                print("Response click : " + response)
+
+                if response == "MOVEOK":
+                    return True, (row, col)
+                else:
+                    return False, None
+
+            else:
+                print(f"Intersection ({row}, {col}) is already occupied.")
         else:
-            print(f"Cell ({row}, {col}) is already occupied.")
+            print(f"Click is outside the tolerance zone of any intersection.")
     else:
-        print("Click outside the board.")
+        print("Click is outside the board.")
 
-    return False, None  # Mouvement échoué
-
+    return False, None
 
 def handle_events(event, client_socket, join_buttons, y_position, empty_board, current_player, connected,
-                  waiting_for_player, in_game):
+                  waiting_for_player, in_game, current_time, last_time_update):
     if event.type == pygame.QUIT:
         is_running = False
 
@@ -319,34 +337,39 @@ def handle_events(event, client_socket, join_buttons, y_position, empty_board, c
         for button, game_id in join_buttons:
             handle_join_buttons(event, button, game_id, client_socket, in_game, waiting_for_player)
 
+
     if connected and show_board:
-        if event.type == pygame.MOUSEBUTTONDOWN:  # Détecter un clic de souris
-            if handle_board_click(empty_board, event.pos[0], event.pos[1], current_player)[0]:
-                move = handle_board_click(empty_board, event.pos[0], event.pos[1], current_player)[1]
+        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:  # Clic gauche uniquement
+            success, move = handle_board_click(empty_board, event.pos[0], event.pos[1], current_player, client_socket)
+            if success:
+                print(f"Move registered at {move}")
 
     if waiting_for_player["value"]:
         if handle_waiting(client_socket):
             waiting_for_player["value"] = False
 
+    if current_time - last_time_update["value"] >= WAITING_INTERVAL:
+        handle_game_status(waiting_for_player, in_game, client_socket, join_buttons, y_position)
+        last_time_update["value"] = current_time
+
     return True
 
 def display_pente_board(screen, board_state):
     """
-    Affiche un plateau de jeu de Pente interactif avec gestion des pions.
+    Affiche un plateau de jeu de Pente interactif avec gestion des intersections.
 
     Args:
         screen: Surface PyGame où dessiner le plateau.
         board_state: Matrice 19x19 représentant l'état du plateau
                      ("Black", "White", ou "") pour chaque intersection.
     """
-    #TODO: display pieces on intersections
     clear_interface(manager)
 
     # Dimensions du plateau et de la fenêtre
     board_size = 19
     cell_size = 30  # Taille d'une cellule en pixels
     window_width, window_height = screen.get_size()
-    board_pixel_size = board_size * cell_size
+    board_pixel_size = (board_size - 1) * cell_size
 
     # Calcul des offsets pour centrer le plateau
     x_offset = (window_width - board_pixel_size) // 2
@@ -356,7 +379,7 @@ def display_pente_board(screen, board_state):
     grid_color = pygame.Color("#000000")  # Noir
 
     # Dessiner les lignes horizontales et verticales
-    for i in range(board_size + 1):  # Ajouter une ligne supplémentaire pour le bord droit/bas
+    for i in range(board_size):
         # Ligne horizontale
         pygame.draw.line(screen, grid_color,
                          (x_offset, y_offset + i * cell_size),
@@ -366,10 +389,9 @@ def display_pente_board(screen, board_state):
                          (x_offset + i * cell_size, y_offset),
                          (x_offset + i * cell_size, y_offset + board_pixel_size), 1)
 
-    # Dessiner les pions
+    # Dessiner les intersections (points)
     for row in range(board_size):
         for col in range(board_size):
-            # Position absolue de la cellule
             cell_x = x_offset + col * cell_size
             cell_y = y_offset + row * cell_size
 
@@ -378,25 +400,11 @@ def display_pente_board(screen, board_state):
 
             # Dessiner un pion si nécessaire
             if cell_state == "Black":
-                color = pygame.Color("#000000")  # Noir
-                border_color = pygame.Color("#FFFFFF")  # Bordure blanche pour le noir
+                pygame.draw.circle(screen, pygame.Color("#000000"), (cell_x, cell_y), cell_size // 4)
             elif cell_state == "White":
-                color = pygame.Color("#FFFFFF")  # Blanc
-                border_color = pygame.Color("#000000")  # Bordure noire pour le blanc
-            else:
-                color = None
-                border_color = None
+                pygame.draw.circle(screen, pygame.Color("#FFFFFF"), (cell_x, cell_y), cell_size // 4)
 
-            if color:
-                # Dessiner la bordure (cercle plus grand)
-                pygame.draw.circle(screen, border_color,
-                                   (cell_x + cell_size // 2, cell_y + cell_size // 2),
-                                   cell_size // 3 + 2)  # Rayon plus grand pour la bordure
 
-                # Dessiner le pion (cercle plus petit à l'intérieur de la bordure)
-                pygame.draw.circle(screen, color,
-                                   (cell_x + cell_size // 2, cell_y + cell_size // 2),
-                                   cell_size // 3)  # Rayon plus petit pour le pion
 
 def handle_waiting(client_socket):
     send_packet("ISFULL", client_socket)
@@ -407,8 +415,28 @@ def handle_waiting(client_socket):
 
     return False
 
+def handle_game_status(waiting_for_player, in_game, client_socket, join_buttons, y_position):
+    global show_board
+    if not waiting_for_player["value"] and in_game["value"]:
+            show_board = True
+            send_packet("STATUS", client_socket)
+            print("Status packet sent")
+            response = receive_packet(client_socket)
+            print("Response status : " + response)
+            split_response = response.split(" ")
+
+            if split_response[0] == "NOTENDED":
+                if len(split_response) > 1:
+                    print(f"X; {response.split(" ")[1]}, Y: {response.split(" ")[2]}")
+            else:
+                if response.split(" ")[0] == "ENDED":
+                    show_board = False
+                    in_game["value"] = False
+                    display_games(response.split(" ")[1], join_buttons, y_position)
+
 def main_loop():
     # Initialisation de la connexion au serveur
+    last_update_time = {"value": 0}
     join_buttons = []
     y_position = 100
     current_player = {"curr": "Black"}  # Par défaut, commence par Noir
@@ -430,19 +458,10 @@ def main_loop():
         time_delta = clock.tick(60) / 1000.0
 
         for event in pygame.event.get():
-            if not handle_events(event, client_socket, join_buttons, y_position, empty_board, current_player, connected, waiting_for_player, in_game):
+            if not handle_events(event, client_socket, join_buttons, y_position, empty_board, current_player, connected, waiting_for_player, in_game, pygame.time.get_ticks(), last_update_time):
                 is_running = False
 
             manager.process_events(event)
-
-        if not waiting_for_player["value"] and in_game["value"]:
-            show_board = True
-            send_packet("HASENDED", client_socket)
-            response = receive_packet(client_socket)
-            if response.split(" ")[0] == "YES":
-                show_board = False
-                in_game["value"] = False
-                display_games(response.split(" ")[1], join_buttons, y_position)
 
         manager.update(time_delta)
 
