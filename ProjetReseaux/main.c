@@ -19,6 +19,7 @@
 #include <string.h>
 #include <time.h>
 #include <stdbool.h>
+#include <assert.h>
 
 #ifdef REVDNS
 #include <netdb.h>
@@ -36,6 +37,7 @@ typedef struct Client {
     int forfeit;
     int games_played;
     int current_game_id;
+    int received;
 }Client;
 
 typedef struct Game {
@@ -50,6 +52,8 @@ typedef struct Game {
     int last_move_col;  // Dernière colonne jouée
     int last_player_turn;
     int winner;
+    int player1_captures;
+    int player2_captures;
 } Game;
 
 void sendPacket(const char* buffer, Client client);
@@ -84,7 +88,11 @@ char* get_board(Game *game);
 
 bool check_win(Game *game, int row, int col, int turn);
 
-int test = 0;
+void capturePieces(Game *game, int row, int col, int turn);
+
+void test_capturePieces();
+
+int both_received = 0;
 
 int main() {
     int s, clilen, flags, max_sd, sd, activity, new_s, valread, i;
@@ -214,8 +222,10 @@ int main() {
                     // Envoyer le message au client
                     char *response = processcmd(buffer, &clients[i], available_games, active_games, &curr_available_games, &curr_active_games);
 
-                    printf("Commande envoyée : %s\n", response);
-                    sendPacket(response, clients[i]);
+                    if (response != NULL && response != "DISCONNECTED") {
+                        printf("Commande envoyée : %s\n", response);
+                        sendPacket(response, clients[i]);
+                    }
 
                     free(response);
                 }
@@ -276,9 +286,19 @@ char* processcmd(char *buffer, Client *client, Game *available_games, Game *acti
 
         memset(response, 0, MAX_BUFFER_SIZE);
         snprintf(response, MAX_BUFFER_SIZE, "OK %s", games_list);
-    }else if(strcmp(verb, "DISCONNECT") == 0){
-        memset(response, 0, MAX_BUFFER_SIZE);
-        snprintf(response, MAX_BUFFER_SIZE, "Déconnecté.");
+    }else if(strcmp(verb, "DISCONNECT") == 0) {
+        printf("LOG: DISCONNECT command received from %s\n", client->name);
+
+        // Vérifiez si le socket est valide avant d'envoyer le message
+        if (client->socket_fd > 0) {
+            // Répondre avec un message de confirmation
+            memset(response, 0, MAX_BUFFER_SIZE);
+            snprintf(response, MAX_BUFFER_SIZE, "DISCONNECTED");
+            sendPacket(response, *client);
+        }
+
+        // Fermer la connexion du client
+        closeconnection(client);
     }else if (strcmp(verb, "MOVE") == 0) {
         const int row = atoi(strtok(NULL, " "));
         const int col = atoi(strtok(NULL, " "));
@@ -291,6 +311,8 @@ char* processcmd(char *buffer, Client *client, Game *available_games, Game *acti
                 if ((game->turn == 1 && game->player1 == client) || (game->turn == 2 && game->player2 == client)) {
                     if (check_move(row, col, game)) {
                         printf("LOG: Valid move from %s\n", client->name);
+                        game->board[row][col] = game->turn;
+                        capturePieces(game, row, col, game->turn);
 
                         if (check_win(game, row, col, game->turn)) {
                             printf("LOG: %s won the game\n", client->name);
@@ -300,14 +322,15 @@ char* processcmd(char *buffer, Client *client, Game *available_games, Game *acti
                         // Mettre à jour le plateau et enregistrer le mouvement
                         game->last_move_row = row;
                         game->last_move_col = col;
-                        game->board[row][col] = game->turn;
                         game->last_player_turn = (game->turn == 1) ? 1 : 2; // Enregistre le joueur actif
 
                         // Passe au tour suivant
                         game->turn = (game->turn == 1) ? 2 : 1;
 
                         memset(response, 0, MAX_BUFFER_SIZE);
-                        snprintf(response, MAX_BUFFER_SIZE, "MOVEOK");
+                        char *board = get_board(game);
+                        snprintf(response, MAX_BUFFER_SIZE, "MOVEOK %s", board);
+                        free(board);
                     } else {
                         printf("LOG: Invalid move attempted by %s\n", client->name);
                         memset(response, 0, MAX_BUFFER_SIZE);
@@ -332,7 +355,7 @@ char* processcmd(char *buffer, Client *client, Game *available_games, Game *acti
         }
 
         memset(response, 0, MAX_BUFFER_SIZE);
-        snprintf(response, MAX_BUFFER_SIZE, "OK");
+        snprintf(response, MAX_BUFFER_SIZE, "CREATEOK");
     }else if(strcmp(verb, "JOIN") == 0) {
         char *game_id_string = strtok(NULL, " ");
         if(game_id_string == NULL) {
@@ -355,7 +378,7 @@ char* processcmd(char *buffer, Client *client, Game *available_games, Game *acti
         }
 
         memset(response, 0, MAX_BUFFER_SIZE);
-        snprintf(response, MAX_BUFFER_SIZE, "OK");
+        snprintf(response, MAX_BUFFER_SIZE, "JOINOK");
         return response;
     }else if(strcmp(verb, "STATS") == 0) {
         memset(response, 0, MAX_BUFFER_SIZE);
@@ -371,13 +394,13 @@ char* processcmd(char *buffer, Client *client, Game *available_games, Game *acti
         displayGameList(*curr_available_games, available_games, games_list);
 
         memset(response, 0, MAX_BUFFER_SIZE);
-        snprintf(response, MAX_BUFFER_SIZE, "OK %s", games_list);
+        snprintf(response, MAX_BUFFER_SIZE, "QUITOK %s", games_list);
     }else if (strcmp(verb, "LIST") == 0){
         char games_list[MAX_BUFFER_SIZE];
         displayGameList(*curr_available_games, available_games, games_list);
 
         memset(response, 0, MAX_BUFFER_SIZE);
-        snprintf(response, MAX_BUFFER_SIZE, "OK %s", games_list);
+        snprintf(response, MAX_BUFFER_SIZE, "LISTOK %s", games_list);
     }else if (strcmp(verb, "FORFEIT") == 0) {
         if (client->current_game_id == -1) {
             memset(response, 0, MAX_BUFFER_SIZE);
@@ -387,11 +410,9 @@ char* processcmd(char *buffer, Client *client, Game *available_games, Game *acti
 
         for (int i = 0; i < *curr_active_games; i++) {
             if (active_games[i].id == client->current_game_id) {
-                char games_list[MAX_BUFFER_SIZE];
                 handle_forfeit(&active_games[i], client, curr_active_games, active_games);
-                displayGameList(*curr_available_games, available_games, games_list);
                 memset(response, 0, MAX_BUFFER_SIZE);
-                snprintf(response, MAX_BUFFER_SIZE, "OK %s", games_list);
+                snprintf(response, MAX_BUFFER_SIZE, "FORFEITOK");
                 return response;
             }
         }
@@ -446,21 +467,22 @@ char* processcmd(char *buffer, Client *client, Game *available_games, Game *acti
         for (int i = 0; i < *curr_active_games; i++) {
             if (active_games[i].id == client->current_game_id) {
                 Game *game = &active_games[i];
-                printf("Win status : %d", game->winner);
                 if (game->is_finished) {
                     if ((game->winner == 1 && game->player1 == client) || (game->winner == 2 && game->player2 == client)) {
                         client->current_game_id = -1;
                         memset(response, 0, MAX_BUFFER_SIZE);
                         snprintf(response, MAX_BUFFER_SIZE, "WINNER %s", games_list);
-                        test++;
+                        client->received = 1;
                     } else {
                         memset(response, 0, MAX_BUFFER_SIZE);
                         snprintf(response, MAX_BUFFER_SIZE, "LOSER %s", games_list);
                         client->current_game_id = -1;
-                        test++;
+                        client->received = 1;
                     }
-                    if (test == 2) {
+                    if (game->player1->received == 1 && game->player2->received == 1) {
                         removeGame(game->id, active_games, curr_active_games);
+                        game->player1->received = 0;
+                        game->player2->received = 0;
                     }
                 } else {
                     // Handle ongoing game status
@@ -487,7 +509,7 @@ char* processcmd(char *buffer, Client *client, Game *available_games, Game *acti
         }
 
         memset(response, 0, MAX_BUFFER_SIZE);
-        snprintf(response, MAX_BUFFER_SIZE, strcat(strdup("ENDED "), games_list));
+        snprintf(response, MAX_BUFFER_SIZE, "ENDED %s", games_list);
         client->current_game_id = -1;
     }else {
         memset(response, 0, MAX_BUFFER_SIZE);
@@ -497,9 +519,16 @@ char* processcmd(char *buffer, Client *client, Game *available_games, Game *acti
     return response;
 }
 
-void sendPacket(const char* buffer, const Client client) {
+void sendPacket(const char* buffer, Client client) {
     if(client.socket_fd > 0) {
-        send(client.socket_fd, buffer, strlen(buffer), 0);
+        if (send(client.socket_fd, buffer, strlen(buffer), 0) == -1) {
+            if (errno == EPIPE) {
+                printf("Erreur: Broken pipe\n");
+                closeconnection(&client);
+            } else {
+                perror("Erreur lors de l'envoi du paquet");
+            }
+        }
         return;
     }
 
@@ -555,15 +584,18 @@ bool createGame(Client *client, Game *available_games, int *curr_available_games
     //new_game.player2 = (Client *)malloc(sizeof(Client));
     new_game.last_move_row = -1;
     new_game.last_move_col = -1;
-    new_game.turn = 1; // Par défaut, le joueur 1 commence
-    new_game.last_player_turn = 1;
+    new_game.turn = 2; // Par défaut, le joueur 1 commence
+    new_game.last_player_turn = 2;
     new_game.winner = 0;
     new_game.player2 = NULL;
+    new_game.player1_captures = 0;
+    new_game.player2_captures = 0;
     for (int i = 0; i < 19; i++) {
         for (int j = 0; j < 19; j++) {
-            new_game.board[i][j] = 0;
+            new_game.board[i][j] =  0;;
         }
     }
+    new_game.board[9][9] = 1;
     /*if (new_game.player2 == NULL) {
         perror("Failed to allocate memory for player2");
         return false;
@@ -632,6 +664,7 @@ void initializePlayer(Client *player) {
     player->is_authenticated = 0;
     player->score = 0;
     player->forfeit = 0;
+    player->received = 0;
 }
 
 void displayGameList(int curr_available_games, const Game *available_games, char *games_list) {
@@ -700,15 +733,15 @@ void handle_forfeit(Game *game, Client *forfeiter, int *curr_active_games, Game 
         game->player2->forfeit++;
     }
 
+    game->winner = (game->player1 == forfeiter) ? 2 : 1;
     game->player1->games_played++;
     game->player2->games_played++;
     game->is_finished = 1;
 
-    forfeiter->current_game_id = -1;
     //game->player1->current_game_id = -1;
     //game->player2->current_game_id = -1;
 
-    removeGame(game->id, active_games, curr_active_games);
+    //removeGame(game->id, active_games, curr_active_games);
 }
 
 bool quit_game(Game *games, int *curr_available_games, const Client *client) {
@@ -760,6 +793,14 @@ char* get_board(Game *game) {
 }
 
 bool check_win(Game *game, int row, int col, int turn) {
+    if (turn == 1 && game->player1_captures == 10) {
+        return true;
+    }
+
+    if (turn == 2 && game->player2_captures == 10) {
+        return true;
+    }
+
     int directions[4][2] = {{0, 1}, {1, 0}, {1, 1}, {1, -1}};
     int player = turn;
 
@@ -788,4 +829,115 @@ bool check_win(Game *game, int row, int col, int turn) {
         }
     }
     return false;
+}
+
+void capturePieces(Game *game, int row, int col, int turn) {
+    int directions[8][2] = {{0, 1}, {1, 0}, {1, 1}, {1, -1}, {0, -1}, {-1, 0}, {-1, -1}, {-1, 1}};
+    int opponent = (turn == 1) ? 2 : 1;
+
+    printf("LOG: Starting capture check for player %d at (%d, %d)\n", turn, row, col);
+    printf("LOG: Initial board state at (%d, %d): %d\n", row, col, game->board[row][col]);
+
+    for (int d = 0; d < 8; d++) {
+        int mid1_row = row + directions[d][0];
+        int mid1_col = col + directions[d][1];
+        int mid2_row = row + 2 * directions[d][0];
+        int mid2_col = col + 2 * directions[d][1];
+        int end_row = row + 3 * directions[d][0];
+        int end_col = col + 3 * directions[d][1];
+
+        printf("LOG: Checking direction %d: (%d, %d), (%d, %d), (%d, %d)\n", d, mid1_row, mid1_col, mid2_row, mid2_col, end_row, end_col);
+        printf("LOG: Values: mid1 = %d, mid2 = %d, end = %d\n",
+               game->board[mid1_row][mid1_col],
+               game->board[mid2_row][mid2_col],
+               game->board[end_row][end_col]);
+
+        if (mid1_row >= 0 && mid1_row < 19 && mid1_col >= 0 && mid1_col < 19 &&
+            mid2_row >= 0 && mid2_row < 19 && mid2_col >= 0 && mid2_col < 19 &&
+            end_row >= 0 && end_row < 19 && end_col >= 0 && end_col < 19 &&
+            game->board[mid1_row][mid1_col] == opponent &&
+            game->board[mid2_row][mid2_col] == opponent &&
+            game->board[end_row][end_col] == turn) {
+
+            printf("LOG: Capture detected at: (%d, %d) and (%d, %d)\n", mid1_row, mid1_col, mid2_row, mid2_col);
+
+            game->board[mid1_row][mid1_col] = 0;
+            game->board[mid2_row][mid2_col] = 0;
+
+            if (turn == 1) {
+                game->player1_captures += 2;
+                game->player1->score += 2;
+            } else {
+                game->player2_captures += 2;
+                game->player2->score += 2;
+            }
+        }
+    }
+    printf("LOG: Finished capture check for player %d. Captures: Player 1: %d, Player 2: %d\n",
+           turn, game->player1_captures, game->player2_captures);
+}
+
+void test_capturePieces() {
+    Game game;
+    Client player1, player2;
+
+    // Initialize players
+    player1.socket_fd = 1;
+    player1.is_connected = 1;
+    player1.score = 0;
+    player1.current_game_id = 0;
+    player2.socket_fd = 2;
+    player2.is_connected = 1;
+    player2.score = 0;
+    player2.current_game_id = 0;
+
+    // Initialize game
+    game.id = 0;
+    game.player1 = &player1;
+    game.player2 = &player2;
+    game.is_finished = 0;
+    game.turn = 1;
+    game.player1_captures = 0;
+    game.player2_captures = 0;
+    for (int i = 0; i < 19; i++) {
+        for (int j = 0; j < 19; j++) {
+            game.board[i][j] = 0;
+        }
+    }
+
+    // Set up a board state where a capture should occur
+    game.board[10][10] = 1; // Player 1
+    game.board[11][11] = 2; // Player 2
+    game.board[12][12] = 2; // Player 2
+    game.board[13][13] = 1; // Player 1
+
+    // Display the board before capture
+    printf("Board before capture:\n");
+    for (int i = 0; i < 19; i++) {
+        for (int j = 0; j < 19; j++) {
+            printf("%d ", game.board[i][j]);
+        }
+        printf("\n");
+    }
+    // Make a move that should trigger a capture
+    capturePieces(&game, 13, 13, 1);
+
+    // Display the board after capture
+    printf("Board after capture:\n");
+    for (int i = 0; i < 19; i++) {
+        for (int j = 0; j < 19; j++) {
+            printf("%d ", game.board[i][j]);
+        }
+        printf("\n");
+    }
+
+    // Check if the pieces were captured
+    assert(game.board[11][11] == 0);
+    assert(game.board[12][12] == 0);
+
+    // Check if the score was updated correctly
+    assert(game.player1_captures == 2);
+    assert(game.player1->score == 2);
+
+    printf("test_capturePieces passed\n");
 }

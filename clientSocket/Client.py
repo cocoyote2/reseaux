@@ -7,7 +7,8 @@ import pygame
 from pygame_gui.elements import UILabel, UITextEntryLine, UIButton
 
 global show_board
-WAITING_INTERVAL = 2000
+global show_turn
+WAITING_INTERVAL = 1000
 
 def join_game(game_id, client_socket):
     packet = f"JOIN {game_id}"
@@ -168,7 +169,7 @@ def display_error_message(message, manager):
 def handle_refresh(response):
     verb = response.split(" ")[0]
 
-    if verb != "OK":
+    if verb != "LISTOK":
         return False, "Error when refreshing the game list."
 
     return True, response.split(" ")[1]
@@ -205,12 +206,12 @@ def handle_join_buttons(event, button, game_id, client_socket, in_game, waiting_
     if event.ui_element == button:
         response = join_game(game_id, client_socket)
 
-        if response == "OK":
+        if response == "JOINOK":
             print(f"Game {game_id} joined successfully.")
             show_board = True
             in_game["value"] = True
             waiting_for_player["value"] = False
-            color_player["curr"] = "White"
+            color_player["curr"] = "Black"
         else:
             print(f"Error when joining game {game_id}, response : " + response)
 
@@ -218,17 +219,17 @@ def handle_create_button(client_socket, waiting_for_player, in_game, player_colo
     send_packet("CREATE", client_socket)
     response = receive_packet(client_socket)
 
-    if response == "OK":
+    if response == "CREATEOK":
         clear_interface(manager)
         quit_button.show()
         waiting_label.show()
         waiting_for_player["value"] = True
         in_game["value"] = True
-        player_color["curr"] = "Black"
+        player_color["curr"] = "White"
     else:
         print(f"response : {response}")
 
-def handle_quit_button(client_socket, join_buttons, y_position, waiting_for_player, in_game):
+def handle_quit_button(client_socket, join_buttons, y_position, waiting_for_player, in_game, board):
     global show_board
     if waiting_for_player["value"]:
         print("Je quitte")
@@ -241,7 +242,7 @@ def handle_quit_button(client_socket, join_buttons, y_position, waiting_for_play
 
     verb = response.split(" ")[0]
 
-    if verb == "OK":
+    if verb == "QUITOK":
         waiting_for_player["value"] = False
         in_game["value"] = False
         show_board = False
@@ -249,11 +250,19 @@ def handle_quit_button(client_socket, join_buttons, y_position, waiting_for_play
         create_game_button.show()
         refresh_button.show()
         disconnect_button.show()
+    elif verb == "FORFEITOK":
+        reset_board(board)
+        in_game["value"] = False
+        show_board = False
+        clear_interface(manager)
+        loser_label.show()
+        confirm_winner_button.show()
 
 def handle_disconnect_button(client_socket):
     send_packet("DISCONNECT", client_socket)
 
-def handle_board_click(board_state, mouse_x, mouse_y, current_player, client_socket):
+def handle_board_click(board_state, mouse_x, mouse_y, current_player, client_socket, board):
+    global show_turn
     """
     Gère le clic sur le plateau de jeu et retourne les coordonnées du mouvement effectué.
 
@@ -297,10 +306,14 @@ def handle_board_click(board_state, mouse_x, mouse_y, current_player, client_soc
                 print("Click packet sent")
                 response = receive_packet(client_socket)
 
-                print("Response click : " + response)
+                split_response = response.split(" ")
 
-                if response == "MOVEOK":
-                    board_state[row][col] = 1 if current_player["curr"] == "Black" else 2
+                if split_response[0] == "MOVEOK":
+                    tab = split_response[1].split(",")
+                    for i in range(19):
+                        for j in range(19):
+                            board[i][j] = int(tab[i * 19 + j])
+                    show_turn = False
                     return True, (row, col)
                 else:
                     return False, None
@@ -317,6 +330,7 @@ def handle_board_click(board_state, mouse_x, mouse_y, current_player, client_soc
 
 def handle_events(event, client_socket, join_buttons, y_position, empty_board, current_player, connected,
                   waiting_for_player, in_game, current_time, last_time_update, board, player_color):
+    global show_turn
     if event.type == pygame.QUIT:
         is_running = False
 
@@ -332,7 +346,7 @@ def handle_events(event, client_socket, join_buttons, y_position, empty_board, c
             handle_create_button(client_socket, waiting_for_player, in_game, player_color)
 
         if event.ui_element == quit_button:
-            handle_quit_button(client_socket, join_buttons, y_position, waiting_for_player, in_game)
+            handle_quit_button(client_socket, join_buttons, y_position, waiting_for_player, in_game, board)
 
         if event.ui_element == disconnect_button:
             handle_disconnect_button(client_socket)
@@ -347,13 +361,14 @@ def handle_events(event, client_socket, join_buttons, y_position, empty_board, c
 
     if connected and show_board:
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:  # Clic gauche uniquement
-            success, move = handle_board_click(empty_board, event.pos[0], event.pos[1], current_player, client_socket)
+            success, move = handle_board_click(empty_board, event.pos[0], event.pos[1], current_player, client_socket, board)
             if success:
                 print(f"Move registered at {move}")
 
     if waiting_for_player["value"]:
         if handle_waiting(client_socket):
             waiting_for_player["value"] = False
+            show_turn = True
 
     if current_time - last_time_update["value"] >= WAITING_INTERVAL:
         handle_game_status(waiting_for_player, in_game, client_socket, join_buttons, y_position, board)
@@ -370,8 +385,11 @@ def display_pente_board(screen, board_state):
         board_state: Matrice 19x19 représentant l'état du plateau
                      ("Black", "White", ou "") pour chaque intersection.
     """
+    global show_turn
     clear_interface(manager)
 
+    if show_turn:
+        turn_label.show()
     # Dimensions du plateau et de la fenêtre
     board_size = 19
     cell_size = 30  # Taille d'une cellule en pixels
@@ -406,9 +424,9 @@ def display_pente_board(screen, board_state):
             cell_state = board_state[row][col]
 
             # Dessiner un pion si nécessaire
-            if cell_state == 1:
+            if cell_state == 2:
                 pygame.draw.circle(screen, pygame.Color("#000000"), (cell_x, cell_y), cell_size // 4)
-            elif cell_state == 2:
+            elif cell_state == 1:
                 pygame.draw.circle(screen, pygame.Color("#FFFFFF"), (cell_x, cell_y), cell_size // 4)
 
 
@@ -429,6 +447,7 @@ def reset_board(board_state):
 
 def handle_game_status(waiting_for_player, in_game, client_socket, join_buttons, y_position, board):
     global show_board
+    global show_turn
     if not waiting_for_player["value"] and in_game["value"]:
         show_board = True
         send_packet("STATUS", client_socket)
@@ -446,6 +465,7 @@ def handle_game_status(waiting_for_player, in_game, client_socket, join_buttons,
             in_game["value"] = False
             display_games(split_response[1], join_buttons, y_position)
         elif split_response[0] == "MOVE":
+            show_turn = True
             tab = split_response[1].split(",")
             for i in range(19):
                 for j in range(19):
@@ -474,8 +494,11 @@ def main_loop():
     current_player = {"curr": "Black"}  # Par défaut, commence par Noir
     client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     empty_board = [[0 for _ in range(19)] for _ in range(19)]
+    empty_board[9][9] = 1
     global show_board
+    global show_turn
     show_board = False
+    show_turn = False
     connected = {"value": False}
     waiting_for_player = {"value": False}
     in_game = {"value" : False}
@@ -595,6 +618,13 @@ confirm_winner_button = UIButton(
     manager=manager
 )
 confirm_winner_button.hide()
+
+turn_label = UILabel(
+    relative_rect=pygame.Rect((0, 280), (100, 40)),
+    text="Your turn",
+    manager=manager
+)
+turn_label.hide()
 
 def main():
     main_loop()
