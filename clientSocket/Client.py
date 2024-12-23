@@ -1,7 +1,4 @@
 import socket
-import threading
-from http.client import responses
-
 import pygame_gui
 import pygame
 from pygame_gui.elements import UILabel, UITextEntryLine, UIButton
@@ -73,7 +70,7 @@ def handle_connection(client_socket, username, password):
 
         verb = response.split(" ")[0]
 
-        if verb != "OK":
+        if verb != "CONNECTOK":
             return False, "Invalid credentials or server error."
 
         return True, response.split(" ")[1]  # Succès
@@ -152,7 +149,7 @@ def display_error_message(message, manager):
 
     # Panneau pour le rectangle
     error_panel = pygame_gui.elements.UIPanel(
-        relative_rect=pygame.Rect(rect_x, rect_y, rect_width, rect_height),
+        relative_rect=pygame.Rect(300, 425, rect_width, rect_height),
         starting_height=1,
         manager=manager,
         object_id="#error_panel"
@@ -328,6 +325,22 @@ def handle_board_click(board_state, mouse_x, mouse_y, current_player, client_soc
 
     return False, None
 
+def handle_create_account_button(client_socket):
+    username = username_input.get_text()
+    password = password_input.get_text()
+    if not username or not password:
+        error_label = UILabel(
+            relative_rect=pygame.Rect((300, 425), (200, 30)),
+            text="Invalid user or password",
+            manager=manager,
+            object_id="error_label"
+        )
+
+
+    send_packet(f"CREATEACCOUNT {username} {password}", client_socket)
+    response = receive_packet(client_socket)
+    print(f"Response create : {response}")
+
 def handle_events(event, client_socket, join_buttons, y_position, empty_board, current_player, connected,
                   waiting_for_player, in_game, current_time, last_time_update, board, player_color):
     global show_turn
@@ -338,6 +351,9 @@ def handle_events(event, client_socket, join_buttons, y_position, empty_board, c
     if event.type == pygame_gui.UI_BUTTON_PRESSED:
         if event.ui_element == submit_button:
             handle_submit_button(client_socket, join_buttons, y_position, connected)
+
+        if event.ui_element == create_account_button:
+            handle_create_account_button(client_socket)
 
         if event.ui_element == refresh_button:
             handle_refresh_button(client_socket, join_buttons, y_position)
@@ -536,27 +552,32 @@ screen, background, manager, clock = init_pygame()
 
 # Ajout des éléments de l'interface graphique
 username_label = UILabel(
-    relative_rect=pygame.Rect((100, 150), (100, 30)),
+    relative_rect=pygame.Rect((200, 225), (100, 30)),  # Décalé de 50 pixels
     text="Name:",
     manager=manager
 )
 username_input = UITextEntryLine(
-    relative_rect=pygame.Rect((200, 150), (200, 30)),
+    relative_rect=pygame.Rect((300, 225), (200, 30)),  # Décalé de 50 pixels
     manager=manager
 )
 password_label = UILabel(
-    relative_rect=pygame.Rect((100, 200), (100, 30)),
+    relative_rect=pygame.Rect((200, 275), (100, 30)),  # Décalé de 50 pixels
     text="Password:",
     manager=manager
 )
 password_input = UITextEntryLine(
-    relative_rect=pygame.Rect((200, 200), (200, 30)),
+    relative_rect=pygame.Rect((300, 275), (200, 30)),  # Décalé de 50 pixels
     manager=manager
 )
 password_input.set_text_hidden(True)  # Masquer le texte du champ Password
 submit_button = UIButton(
-    relative_rect=pygame.Rect((150, 250), (100, 40)),
+    relative_rect=pygame.Rect((300, 325), (100, 40)),  # Décalé de 50 pixels
     text="Submit",
+    manager=manager
+)
+create_account_button = UIButton(
+    relative_rect=pygame.Rect((300, 375), (150, 40)),  # Décalé de 50 pixels
+    text="Create Account",
     manager=manager
 )
 

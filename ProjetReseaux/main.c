@@ -15,11 +15,9 @@
 #include <stdio.h>
 #include <arpa/inet.h>
 #include <stdlib.h>
-#include <stdint.h>
-#include <string.h>
-#include <time.h>
+#include <openssl/evp.h>
 #include <stdbool.h>
-#include <assert.h>
+#include <sqlite3.h>
 
 #ifdef REVDNS
 #include <netdb.h>
@@ -28,6 +26,7 @@
 typedef struct Client {
     int socket_fd;
     struct sockaddr_in addr;
+    int id;
     char name[50];
     int is_connected;
     int score;
@@ -46,10 +45,9 @@ typedef struct Game {
     Client *player2;
     int is_finished;
     int board[19][19];
-
-    int turn;  // 1 pour le joueur 1, 2 pour le joueur 2
-    int last_move_row;  // Dernière ligne jouée
-    int last_move_col;  // Dernière colonne jouée
+    int turn;
+    int last_move_row;
+    int last_move_col;
     int last_player_turn;
     int winner;
     int player1_captures;
@@ -58,7 +56,7 @@ typedef struct Game {
 
 void sendPacket(const char* buffer, Client client);
 
-char* processcmd(char *buffer, Client *client, Game *available_games, Game *active_games, int *curr_available_games, int *curr_active_games);
+char* processcmd(char *buffer, Client *client, Game *available_games, Game *active_games, int *curr_available_games, int *curr_active_games, sqlite3 *db);
 
 void init_clients(Client clients[]);
 
@@ -90,7 +88,21 @@ bool check_win(Game *game, int row, int col, int turn);
 
 void capturePieces(Game *game, int row, int col, int turn);
 
-void test_capturePieces();
+bool openDBConnection(sqlite3 **db);
+
+bool createTableClients(sqlite3 **db);
+
+bool insertClient(sqlite3 *db, char *username, char *password);
+
+bool getClient(sqlite3 *db, char *name, char *password, Client *client);
+
+bool deleteClient(int id, sqlite3 *db);
+
+bool updateClient(sqlite3 *db, Client client);
+
+unsigned char *hash_password(const char *password, unsigned int *out_len);
+
+void print_hash(unsigned char *hash, unsigned int len);
 
 int both_received = 0;
 
@@ -104,12 +116,14 @@ int main() {
     struct sockaddr_in srv, cli;
     fd_set readfds;
     char buffer[513];
-    srand(time(NULL));
+    sqlite3 *db;
 
 #ifdef REUSE
     int optval;
 #endif
-
+    if (!openDBConnection(&db)) {
+        return 1;
+    }
     init_clients(clients);
 
     // Créer le socket du serveur
@@ -191,7 +205,6 @@ int main() {
             for (i = 0; i < MAX_CLIENTS; i++) {
                 if (clients[i].socket_fd == 0) {
                     clients[i].socket_fd = new_s;
-                    //clients[i].is_connected = 1;
                     clients[i].addr = cli;
                     printf("Ajouté à la liste des sockets à l'index %d\n", i);
                     break;
@@ -220,7 +233,7 @@ int main() {
                     buffer[valread] = '\0';
                     printf("Réception de la réponse avec read() : %s\n", buffer);
                     // Envoyer le message au client
-                    char *response = processcmd(buffer, &clients[i], available_games, active_games, &curr_available_games, &curr_active_games);
+                    char *response = processcmd(buffer, &clients[i], available_games, active_games, &curr_available_games, &curr_active_games, db);
 
                     if (response != NULL && response != "DISCONNECTED") {
                         printf("Commande envoyée : %s\n", response);
@@ -232,9 +245,12 @@ int main() {
             }
         }
     }
+
+    sqlite3_close(db);
+    return 0;
 }
 
-char* processcmd(char *buffer, Client *client, Game *available_games, Game *active_games, int *curr_available_games, int *curr_active_games) {
+char* processcmd(char *buffer, Client *client, Game *available_games, Game *active_games, int *curr_available_games, int *curr_active_games, sqlite3 *db) {
     char *response = (char*)malloc(MAX_BUFFER_SIZE);
 
     if(!response) {
@@ -248,9 +264,9 @@ char* processcmd(char *buffer, Client *client, Game *available_games, Game *acti
         memset(response, 0, MAX_BUFFER_SIZE);
         snprintf(response, MAX_BUFFER_SIZE, "Commande invalide : %s", verb);
         return response;
-    }else {
-        formatCommand(verb);
     }
+
+    formatCommand(verb);
 
     if(strcmp(verb, "CONNECT") == 0) {
         char *player_name = strtok(NULL, " ");
@@ -268,24 +284,25 @@ char* processcmd(char *buffer, Client *client, Game *available_games, Game *acti
 
         char *password = strtok(NULL, " ");
 
-        if (password != NULL) {
-            formatCommand(password);
-        }
-
-        if(password == NULL || strcmp(password, PASSWORD) != 0) {
+        if(password == NULL ) {
             memset(response, 0, MAX_BUFFER_SIZE);
             snprintf(response, MAX_BUFFER_SIZE, "Mot de passe invalide : %s + %d", password, strcmp(password, PASSWORD));
             return response;
         }
 
-        strcpy(client->name, player_name);
+        if (!getClient(db, player_name, password, client)) {
+            memset(response, 0, MAX_BUFFER_SIZE);
+            snprintf(response, MAX_BUFFER_SIZE, "Erreur d'authentification");
+            return response;
+        }
+
         client->is_connected = 1;
 
         char games_list[MAX_BUFFER_SIZE];
         displayGameList(*curr_available_games, available_games, games_list);
 
         memset(response, 0, MAX_BUFFER_SIZE);
-        snprintf(response, MAX_BUFFER_SIZE, "OK %s", games_list);
+        snprintf(response, MAX_BUFFER_SIZE, "CONNECTOK %s", games_list);
     }else if(strcmp(verb, "DISCONNECT") == 0) {
         printf("LOG: DISCONNECT command received from %s\n", client->name);
 
@@ -511,6 +528,29 @@ char* processcmd(char *buffer, Client *client, Game *available_games, Game *acti
         memset(response, 0, MAX_BUFFER_SIZE);
         snprintf(response, MAX_BUFFER_SIZE, "ENDED %s", games_list);
         client->current_game_id = -1;
+    }else if (strcmp(verb, "CREATEACCOUNT") == 0) {
+        char *player_name = strtok(NULL, " ");
+        if (player_name == NULL || strcmp(player_name, "") == 0) {
+            memset(response, 0, MAX_BUFFER_SIZE);
+            snprintf(response, MAX_BUFFER_SIZE, "Pseudonyme invalide");
+            return response;
+        }
+
+        char *password = strtok(NULL, " ");
+        if (password == NULL || strcmp(password, "") == 0) {
+            memset(response, 0, MAX_BUFFER_SIZE);
+            snprintf(response, MAX_BUFFER_SIZE, "Mot de passe invalide");
+            return response;
+        }
+
+        if (!insertClient(db, player_name, password)) {
+            memset(response, 0, MAX_BUFFER_SIZE);
+            snprintf(response, MAX_BUFFER_SIZE, "Erreur lors de la création du compte");
+            return response;
+        }
+
+        memset(response, 0, MAX_BUFFER_SIZE);
+        snprintf(response, MAX_BUFFER_SIZE, "CREATEACCOUNTOK");
     }else {
         memset(response, 0, MAX_BUFFER_SIZE);
         snprintf(response, MAX_BUFFER_SIZE, "Commande invalide : %s + length : %lu", verb, strlen(verb));
@@ -539,6 +579,7 @@ void init_clients(Client clients[]) {
     for(int i = 0;i<MAX_CLIENTS;i++) {
         clients[i].socket_fd = 0;
         clients[i].is_connected = 0;
+        clients[i].id = 0;
         clients[i].name[0] = '\0';
         clients[i].wins = 0;
         clients[i].losses = 0;
@@ -547,11 +588,13 @@ void init_clients(Client clients[]) {
         clients[i].is_authenticated = 0;
         clients[i].score = 0;
         clients[i].forfeit = 0;
+        clients[i].received = 0;
     }
 }
 
 void closeconnection(Client *client) {
     close(client->socket_fd);
+    client->id = 0;
     client->socket_fd = 0;
     client->is_connected = 0;
     client->name[0] = '\0';
@@ -656,6 +699,7 @@ bool joinGame(int game_id, Client *client, Game *available_games, int *curr_avai
 void initializePlayer(Client *player) {
     player->socket_fd = 0;
     player->is_connected = 0;
+    player->id = 0;
     player->name[0] = '\0';
     player->wins = 0;
     player->losses = 0;
@@ -877,67 +921,240 @@ void capturePieces(Game *game, int row, int col, int turn) {
            turn, game->player1_captures, game->player2_captures);
 }
 
-void test_capturePieces() {
-    Game game;
-    Client player1, player2;
+bool openDBConnection(sqlite3 **db) {
+    int rc = sqlite3_open("ProjetReseaux.db", db);  // "example.db" sera créée si elle n'existe pas.
 
-    // Initialize players
-    player1.socket_fd = 1;
-    player1.is_connected = 1;
-    player1.score = 0;
-    player1.current_game_id = 0;
-    player2.socket_fd = 2;
-    player2.is_connected = 1;
-    player2.score = 0;
-    player2.current_game_id = 0;
-
-    // Initialize game
-    game.id = 0;
-    game.player1 = &player1;
-    game.player2 = &player2;
-    game.is_finished = 0;
-    game.turn = 1;
-    game.player1_captures = 0;
-    game.player2_captures = 0;
-    for (int i = 0; i < 19; i++) {
-        for (int j = 0; j < 19; j++) {
-            game.board[i][j] = 0;
-        }
+    if (rc) {
+        printf("Can't open database: %s\n", sqlite3_errmsg(*db));
+        return false;
     }
 
-    // Set up a board state where a capture should occur
-    game.board[10][10] = 1; // Player 1
-    game.board[11][11] = 2; // Player 2
-    game.board[12][12] = 2; // Player 2
-    game.board[13][13] = 1; // Player 1
+    printf("Opened database successfully\n");
+    return true;
+}
 
-    // Display the board before capture
-    printf("Board before capture:\n");
-    for (int i = 0; i < 19; i++) {
-        for (int j = 0; j < 19; j++) {
-            printf("%d ", game.board[i][j]);
-        }
-        printf("\n");
+bool createTableClients(sqlite3 **db) {
+    const char *sql = "CREATE TABLE clients ("
+                  "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                  "name TEXT NOT NULL, "
+                  "password BLOB NOT NULL, "
+                  "wins INTEGER DEFAULT 0, "
+                  "losses INTEGER DEFAULT 0, "
+                  "forfeit INTEGER DEFAULT 0, "
+                  "games_played INTEGER DEFAULT 0, "
+                  "score INTEGER DEFAULT 0"
+                  ");";
+
+
+    char *err_msg = 0;
+
+    int rc = sqlite3_exec(*db, sql, 0, 0, &err_msg);
+
+    if (rc != SQLITE_OK) {
+        printf("Erreur lors de la création de la table : %s\n", err_msg);
+        sqlite3_free(err_msg);
+        return false;
     }
-    // Make a move that should trigger a capture
-    capturePieces(&game, 13, 13, 1);
 
-    // Display the board after capture
-    printf("Board after capture:\n");
-    for (int i = 0; i < 19; i++) {
-        for (int j = 0; j < 19; j++) {
-            printf("%d ", game.board[i][j]);
-        }
-        printf("\n");
+    printf("Table créée avec succès\n");
+
+    return true;
+}
+
+bool insertClient(sqlite3 *db, char *username, char *password) {
+    const char *sql = "INSERT INTO clients (name, password, wins, losses, forfeit, games_played, score) VALUES (?, ?, ?, ?, ?, ?, ?);";
+    sqlite3_stmt *stmt;
+
+    // Préparer la requête SQL
+    int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, 0);
+    if (rc != SQLITE_OK) {
+        printf("Erreur lors de la préparation de la requête : %s\n", sqlite3_errmsg(db));
+        return false;
     }
 
-    // Check if the pieces were captured
-    assert(game.board[11][11] == 0);
-    assert(game.board[12][12] == 0);
+    // Hacher le mot de passe
+    unsigned int hash_len;
+    unsigned char *hashed_password = hash_password(password, &hash_len);
+    if (hashed_password == NULL) {
+        sqlite3_finalize(stmt);
+        return false;
+    }
 
-    // Check if the score was updated correctly
-    assert(game.player1_captures == 2);
-    assert(game.player1->score == 2);
+    // Lier les valeurs à la requête SQL
+    sqlite3_bind_text(stmt, 1, username, -1, SQLITE_STATIC);  // Nom
+    sqlite3_bind_blob(stmt, 2, hashed_password, hash_len, SQLITE_STATIC);  // Mot de passe haché en tant que BLOB
+    sqlite3_bind_int(stmt, 3, 0);  // wins
+    sqlite3_bind_int(stmt, 4, 0);  // losses
+    sqlite3_bind_int(stmt, 5, 0);  // forfeit
+    sqlite3_bind_int(stmt, 6, 0);  // games_played
+    sqlite3_bind_int(stmt, 7, 0);  // score
 
-    printf("test_capturePieces passed\n");
+    // Exécuter la requête SQL
+    if (sqlite3_step(stmt) != SQLITE_DONE) {
+        printf("Erreur lors de l'exécution de la requête : %s\n", sqlite3_errmsg(db));
+        free(hashed_password);
+        sqlite3_finalize(stmt);
+        return false;
+    }
+
+    printf("Données insérées avec succès\n");
+
+    // Libérer la mémoire
+    free(hashed_password);
+    sqlite3_finalize(stmt);
+    return true;
+}
+
+bool getClient(sqlite3 *db, char *name, char *password, Client *client) {
+    const char *sql = "SELECT * FROM clients WHERE name = ? and password = ?;";
+    sqlite3_stmt *stmt;
+    unsigned int hash_len;
+
+    int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, 0);
+    if (rc != SQLITE_OK) {
+        printf("Erreur lors de la préparation de la requête : %s\n", sqlite3_errmsg(db));
+        return false;
+    }
+
+    unsigned char *has = hash_password(password, &hash_len);
+    sqlite3_bind_text(stmt, 1, name, -1, SQLITE_STATIC);
+    sqlite3_bind_blob(stmt, 2, has, hash_len, SQLITE_STATIC);
+
+    printf("getClient : \n");
+    print_hash(has, hash_len);
+    bool user_found = false;
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        int id = sqlite3_column_int(stmt, 0);
+        const char *found_name = (const char *)sqlite3_column_text(stmt, 1);
+        const unsigned char *found_password = sqlite3_column_blob(stmt, 2);
+        int wins = sqlite3_column_int(stmt, 3);
+        int losses = sqlite3_column_int(stmt, 4);
+        int forfeit = sqlite3_column_int(stmt, 5);
+        int games_played = sqlite3_column_int(stmt, 6);
+        int score = sqlite3_column_int(stmt, 7);
+
+        printf("User found: ID = %d, Name = %s, Password = %p, Wins = %d, Losses = %d, Forfeit = %d, Games Played = %d, Score = %d\n",
+               id, found_name, found_password, wins, losses, forfeit, games_played, score);
+        print_hash(found_password, hash_len);
+        user_found = true;
+        client->id = id;
+        strcpy(client->name, found_name);
+        client->wins = wins;
+        client->losses = losses;
+        client->forfeit = forfeit;
+        client->games_played = games_played;
+        client->score = score;
+    }
+
+    free(has);
+    sqlite3_finalize(stmt);
+    return user_found;
+}
+
+bool deleteClient(int id, sqlite3 *db) {
+    const char *sql = "DELETE FROM clients WHERE id = ?;";
+    sqlite3_stmt *stmt;
+
+    int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, 0);
+    if (rc != SQLITE_OK) {
+        printf("Erreur lors de la préparation de la requête : %s\n", sqlite3_errmsg(db));
+        return false;
+    }
+
+    sqlite3_bind_int(stmt, 1, id);
+
+    if (sqlite3_step(stmt) != SQLITE_DONE) {
+        printf("Erreur lors de l'exécution de la requête : %s\n", sqlite3_errmsg(db));
+        return false;
+    }
+
+    printf("Data deleted successfully\n");
+    sqlite3_finalize(stmt);
+    return true;
+}
+
+bool updateClient(sqlite3 *db, Client client) {
+    const char *sql = "UPDATE clients SET name = ?, password = ?, wins = ?, losses = ?, forfeit = ?, games_played = ?, score = ? WHERE id = ?;";
+    sqlite3_stmt *stmt;
+
+    int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, 0);
+    if (rc != SQLITE_OK) {
+        printf("Erreur lors de la préparation de la requête : %s\n", sqlite3_errmsg(db));
+        return false;
+    }
+    sqlite3_bind_text(stmt, 1, "Test2", -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, "Test2", -1, SQLITE_STATIC);
+    sqlite3_bind_int(stmt, 3, 0);
+    sqlite3_bind_int(stmt, 4, 0);
+    sqlite3_bind_int(stmt, 5, 0);
+    sqlite3_bind_int(stmt, 6, 0);
+    sqlite3_bind_int(stmt, 7, 0);
+    sqlite3_bind_int(stmt, 8, 1);
+
+    if (sqlite3_step(stmt) != SQLITE_DONE) {
+        printf("Erreur lors de l'exécution de la requête : %s\n", sqlite3_errmsg(db));
+        return false;
+    }
+
+    printf("Data updated successfully\n");
+    sqlite3_finalize(stmt);
+    return true;
+}
+
+unsigned char *hash_password(const char *password, unsigned int *out_len) {
+    unsigned char digest[EVP_MAX_MD_SIZE];
+    unsigned int digest_len;
+
+    // Créer un contexte pour l'algorithme de hachage
+    EVP_MD_CTX *mdctx = EVP_MD_CTX_new();
+    if (mdctx == NULL) {
+        fprintf(stderr, "Error creating digest context\n");
+        return NULL;
+    }
+
+    // Initialiser le contexte pour utiliser l'algorithme SHA-256 (vous pouvez utiliser MD5 ou SHA-1 si vous préférez)
+    if (EVP_DigestInit_ex(mdctx, EVP_sha256(), NULL) != 1) {
+        fprintf(stderr, "Error initializing digest\n");
+        EVP_MD_CTX_free(mdctx);
+        return NULL;
+    }
+
+    // Mettre à jour le contexte avec le mot de passe
+    if (EVP_DigestUpdate(mdctx, password, strlen(password)) != 1) {
+        fprintf(stderr, "Error updating digest\n");
+        EVP_MD_CTX_free(mdctx);
+        return NULL;
+    }
+
+    // Finaliser le hachage
+    if (EVP_DigestFinal_ex(mdctx, digest, &digest_len) != 1) {
+        fprintf(stderr, "Error finalizing digest\n");
+        EVP_MD_CTX_free(mdctx);
+        return NULL;
+    }
+
+    // Libérer le contexte du hachage
+    EVP_MD_CTX_free(mdctx);
+
+    // Allouer de la mémoire pour le tableau binaire
+    unsigned char *hash_binary = malloc(digest_len);
+    if (hash_binary == NULL) {
+        fprintf(stderr, "Error allocating memory for hash\n");
+        return NULL;
+    }
+
+    // Copier les octets du hachage dans le tableau binaire
+    memcpy(hash_binary, digest, digest_len);
+
+    // Retourner le tableau binaire et sa longueur
+    *out_len = digest_len;
+
+    return hash_binary;
+}
+
+void print_hash(unsigned char *hash, unsigned int len) {
+    for (unsigned int i = 0; i < len; i++) {
+        printf("%02x", hash[i]);  // Affichage de chaque octet en hexadécimal
+    }
+    printf("\n");
 }
