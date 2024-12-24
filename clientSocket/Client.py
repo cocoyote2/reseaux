@@ -248,12 +248,7 @@ def handle_quit_button(client_socket, join_buttons, y_position, waiting_for_play
         refresh_button.show()
         disconnect_button.show()
     elif verb == "FORFEITOK":
-        reset_board(board)
-        in_game["value"] = False
-        show_board = False
-        clear_interface(manager)
-        loser_label.show()
-        confirm_winner_button.show()
+        print("Forfeitok")
 
 def handle_disconnect_button(client_socket):
     send_packet("DISCONNECT", client_socket)
